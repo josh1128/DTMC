@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import io
 import math
+from datetime import datetime
  
 import pandas as pd
 import plotly.express as px
@@ -112,7 +113,7 @@ def detect_format(raw_values) -> str:
  
 def format_value(value: float | None, fmt: str, original: str = "") -> str:
     """Format a parsed number back into a display string for its metric type."""
-    if value is None:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
         # Preserve non-numeric original text (e.g. 'Meets Req', 'NA').
         return str(original) if original not in (None, "") else "—"
     if fmt == "currency":
@@ -120,6 +121,181 @@ def format_value(value: float | None, fmt: str, original: str = "") -> str:
     if fmt == "percent":
         return f"{value:g}%"
     return f"{value:,.2f}"
+ 
+ 
+# --------------------------------------------------------------------------- #
+# PDF report (reportlab for layout, matplotlib for static charts)
+# --------------------------------------------------------------------------- #
+ACCENT = "#1f6f8b"   # brand teal (also used by the on-screen charts)
+POS = "#2a9d4a"
+NEG = "#c0392b"
+ 
+ 
+def _metric_png(metric: str, num_v: pd.DataFrame, fmt: str) -> bytes | None:
+    """Render one metric's bar chart to PNG bytes with matplotlib (Agg)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+ 
+    series = num_v.loc[metric].dropna().sort_values(ascending=False)
+    if series.empty:
+        return None
+    labels, values = list(series.index), series.values
+    diverging = (values < 0).any()
+    bar_colors = [POS if v >= 0 else NEG for v in values] if diverging else [ACCENT] * len(values)
+ 
+    fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
+    bars = ax.bar(labels, values, color=bar_colors)
+    ax.set_title(metric, fontsize=10, fontweight="bold")
+    ax.axhline(0, color="#888888", linewidth=0.6)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.tick_params(axis="x", labelrotation=45, labelsize=7)
+    for lbl in ax.get_xticklabels():
+        lbl.set_ha("right")
+    ax.tick_params(axis="y", labelsize=7)
+ 
+    if fmt == "currency":
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:,.0f}"))
+        labeller = lambda v: f"${v:,.0f}"
+    elif fmt == "percent":
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}%"))
+        labeller = lambda v: f"{v:g}%"
+    else:
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.2f}"))
+        labeller = lambda v: f"{v:,.2f}"
+    ax.bar_label(bars, labels=[labeller(v) for v in values], fontsize=6, padding=2)
+ 
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
+ 
+ 
+def build_pdf_report(raw_v: pd.DataFrame, num_v: pd.DataFrame,
+                     formats: dict, source_label: str) -> bytes:
+    """Assemble a landscape PDF: title, comparison table, one chart per metric."""
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Table, TableStyle, Image)
+ 
+    metrics = list(raw_v.index)
+    banks = list(raw_v.columns)
+    page_w, page_h = landscape(letter)
+    margin = 0.5 * inch
+    avail_w = page_w - 2 * margin
+ 
+    styles = getSampleStyleSheet()
+    h_cell = ParagraphStyle("hcell", parent=styles["Normal"], fontSize=6.5,
+                            leading=8, textColor=colors.white, fontName="Helvetica-Bold")
+    row_lbl = ParagraphStyle("rowlbl", parent=styles["Normal"], fontSize=7,
+                             leading=8, fontName="Helvetica-Bold")
+    subtitle = ParagraphStyle("sub", parent=styles["Normal"], fontSize=8,
+                              textColor=colors.HexColor("#666666"))
+ 
+    story = [
+        Paragraph("Bank Metrics Report", styles["Title"]),
+        Paragraph(
+            f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
+            f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
+            f"&nbsp;|&nbsp; source: {source_label}",
+            subtitle,
+        ),
+        Spacer(1, 10),
+    ]
+ 
+    # --- Comparison table (banks as rows so it grows down the page, not off it).
+    header = [Paragraph("Bank", h_cell)] + [Paragraph(m, h_cell) for m in metrics]
+    table_data = [header]
+    red_cells = []  # (col, row) coords of negative values
+    for r, bank in enumerate(banks, start=1):
+        cells = [Paragraph(bank, row_lbl)]
+        for c, metric in enumerate(metrics, start=1):
+            val = num_v.loc[metric, bank]
+            cells.append(format_value(val, formats[metric], raw_v.loc[metric, bank]))
+            if pd.notna(val) and val < 0:
+                red_cells.append((c, r))
+        table_data.append(cells)
+ 
+    first_w = 1.0 * inch
+    other_w = (avail_w - first_w) / max(len(metrics), 1)
+    table = Table(table_data, colWidths=[first_w] + [other_w] * len(metrics),
+                  repeatRows=1)
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(ACCENT)),
+        ("FONTSIZE", (0, 1), (-1, -1), 7),
+        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f7f9")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for c, r in red_cells:
+        style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(NEG)))
+    table.setStyle(TableStyle(style))
+    story += [table, Spacer(1, 16),
+              Paragraph("Per-metric comparison", styles["Heading2"]),
+              Spacer(1, 4)]
+ 
+    # --- Charts: two per row.
+    img_w = (avail_w - 0.2 * inch) / 2
+    img_h = img_w * 0.6
+    pair = []
+    chart_rows = []
+    for metric in metrics:
+        png = _metric_png(metric, num_v, formats[metric])
+        if png is None:
+            continue
+        pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
+        if len(pair) == 2:
+            chart_rows.append(pair)
+            pair = []
+    if pair:
+        pair.append("")
+        chart_rows.append(pair)
+    if chart_rows:
+        grid = Table(chart_rows, colWidths=[img_w + 0.1 * inch] * 2)
+        grid.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(grid)
+ 
+    def _footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#999999"))
+        canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
+        canvas.drawString(margin, 0.3 * inch, "Bank Metrics Report — in MM (CAD)")
+        canvas.restoreState()
+ 
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(letter),
+                            leftMargin=margin, rightMargin=margin,
+                            topMargin=margin, bottomMargin=0.6 * inch,
+                            title="Bank Metrics Report")
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buf.getvalue()
+ 
+ 
+@st.cache_data(show_spinner="Building PDF report…")
+def get_report_bytes(raw_csv: str, formats_items: tuple,
+                     metrics: tuple, banks: tuple, source_label: str) -> bytes:
+    """Cached wrapper so the PDF only rebuilds when data/selection changes."""
+    raw_v = pd.read_csv(io.StringIO(raw_csv), dtype=str,
+                        keep_default_na=False).fillna("").set_index(METRIC_COL)
+    raw_v = raw_v.loc[list(metrics), list(banks)]
+    formats = dict(formats_items)
+    num_v = raw_v.apply(lambda row: [parse_value(v) for v in row], axis=1,
+                        result_type="expand").astype("float64")
+    num_v.columns, num_v.index = raw_v.columns, raw_v.index
+    return build_pdf_report(raw_v, num_v, formats, source_label)
  
  
 # --------------------------------------------------------------------------- #
@@ -136,8 +312,12 @@ def ensure_seed_csv() -> None:
  
  
 def load_raw(source) -> pd.DataFrame:
-    """Load the CSV into a frame indexed by metric name (cells kept as strings)."""
-    df = pd.read_csv(source, dtype=str).fillna("")
+    """Load the CSV into a frame indexed by metric name (cells kept as strings).
+ 
+    keep_default_na=False so literal text like 'NA' is preserved verbatim rather
+    than being silently converted to a missing value by pandas.
+    """
+    df = pd.read_csv(source, dtype=str, keep_default_na=False).fillna("")
     if df.columns[0] != METRIC_COL:
         df = df.rename(columns={df.columns[0]: METRIC_COL})
     df = df.set_index(METRIC_COL)
@@ -158,10 +338,6 @@ def build_numeric(raw: pd.DataFrame):
 # UI
 # --------------------------------------------------------------------------- #
 st.set_page_config(page_title="Bank Metrics Dashboard", page_icon="🏦", layout="wide")
- 
-ACCENT = "#1f6f8b"   # table-header teal, used as the brand colour
-POS = "#2a9d4a"
-NEG = "#c0392b"
  
 st.title("🏦 Bank Metrics Dashboard")
 st.caption("In MM (CAD) unless the metric name says otherwise. "
@@ -188,8 +364,10 @@ with st.sidebar:
 try:
     if upload is not None:
         raw = load_raw(io.StringIO(upload.getvalue().decode("utf-8")))
+        source_label = upload.name
     else:
         raw = load_raw(CSV_PATH)
+        source_label = os.path.basename(CSV_PATH)
 except Exception as exc:  # noqa: BLE001
     st.error(f"Could not read the data: {exc}")
     st.stop()
@@ -218,6 +396,33 @@ if not sel_banks or not sel_metrics:
  
 raw_v = raw.loc[sel_metrics, sel_banks]
 num_v = numeric.loc[sel_metrics, sel_banks]
+ 
+# ---- Sidebar: PDF report --------------------------------------------------- #
+with st.sidebar:
+    st.divider()
+    st.header("Report")
+    st.caption("Exports the table and charts for the currently selected "
+               "banks and metrics.")
+    try:
+        report_bytes = get_report_bytes(
+            raw_v.reset_index().to_csv(index=False),
+            tuple((m, formats[m]) for m in sel_metrics),
+            tuple(sel_metrics),
+            tuple(sel_banks),
+            source_label,
+        )
+        st.download_button(
+            "📄 Download report (PDF)",
+            data=report_bytes,
+            file_name=f"bank_metrics_report_{datetime.now():%Y%m%d}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    except ModuleNotFoundError as exc:
+        st.warning(f"PDF export needs an extra package: `{exc.name}`. "
+                   "Install with `pip install reportlab matplotlib`.")
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not build the PDF: {exc}")
  
 # --------------------------------------------------------------------------- #
 # Tabs
@@ -333,3 +538,4 @@ upload), so it stays in sync automatically:
 No code changes needed for new rows or columns.
         """
     )
+ 
