@@ -82,7 +82,7 @@ MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
 # name matches one of these keywords; everything else lands in the second
 # topic. New CSV rows are therefore auto-assigned -- no code changes needed.
 PERFORMANCE_KEYWORDS = ("revenue", "income", "earnings", "profit", "margin",
-                        "yoy", "growth", "eps", "roe", "roa")
+                        "yoy", "growth", "eps", "roe", "roa", "equity")
  
 TOPIC_PERFORMANCE = "Financial Performance"
 TOPIC_RISK = "Capital, Liquidity & Credit Quality"
@@ -141,11 +141,17 @@ def parse_value(raw) -> float | None:
  
  
 def detect_format(raw_values) -> str:
-    """Classify a metric as 'currency', 'percent', or 'number' from its cells."""
+    """Classify a metric as 'currency', 'percent', or 'number' from its cells.
+ 
+    Majority vote between '$' and '%' so a single mistyped cell (e.g. a stray
+    "$16.48%" in a percent row) can't flip the whole metric's format.
+    """
     cells = [str(v) for v in raw_values if v is not None]
-    if any("$" in c for c in cells):
+    n_cur = sum("$" in c for c in cells)
+    n_pct = sum("%" in c for c in cells)
+    if n_cur > n_pct:
         return "currency"
-    if any("%" in c for c in cells):
+    if n_pct:
         return "percent"
     return "number"
  
@@ -357,6 +363,19 @@ def ensure_seed_csv() -> None:
     pd.DataFrame(data).to_csv(CSV_PATH, index=False)
  
  
+def _dedupe_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Make duplicate metric names unique ('YoY (▲%)' → 'YoY (▲%) (2)') so
+    .loc lookups by metric name never collide. Rename rows in the source file
+    for nicer labels."""
+    seen: dict[str, int] = {}
+    new_index = []
+    for name in df.index:
+        seen[name] = seen.get(name, 0) + 1
+        new_index.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
+    df.index = new_index
+    return df
+ 
+ 
 def load_raw(source) -> pd.DataFrame:
     """Load the CSV into a frame indexed by metric name (cells kept as strings).
  
@@ -368,7 +387,52 @@ def load_raw(source) -> pd.DataFrame:
         df = df.rename(columns={df.columns[0]: METRIC_COL})
     df = df.set_index(METRIC_COL)
     df.index = df.index.str.strip()
-    return df
+    df.columns = df.columns.str.strip()
+    return _dedupe_index(df)
+ 
+ 
+def load_raw_xlsx(source) -> pd.DataFrame:
+    """Load an Excel sheet into the same string frame as load_raw.
+ 
+    Values are converted according to each cell's Excel DISPLAY format, so a
+    cell stored as 0.055 with a percent format arrives as '5.5%', and one
+    stored as 59180 with a '$' format arrives as '$59,180'. Text cells
+    ('Meets Req', 'NA') pass through verbatim. Blank rows are skipped.
+    """
+    from openpyxl import load_workbook
+ 
+    wb = load_workbook(source, data_only=True)
+    ws = wb.active
+ 
+    def cell_to_str(cell) -> str:
+        v = cell.value
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v.strip()
+        fmt = cell.number_format or ""
+        if "%" in fmt:
+            return f"{round(v * 100, 4):g}%"
+        if "$" in fmt:
+            return f"${v:,.0f}"
+        if isinstance(v, float) and v == int(v):
+            return str(int(v))
+        return str(v)
+ 
+    rows = []
+    for row in ws.iter_rows():
+        rows.append([cell_to_str(c) for c in row])
+    if not rows:
+        return pd.DataFrame(columns=[METRIC_COL]).set_index(METRIC_COL)
+ 
+    header = [h if h else f"Column {i}" for i, h in enumerate(rows[0])]
+    header[0] = METRIC_COL
+    body = [r for r in rows[1:] if r and str(r[0]).strip()]  # drop blank rows
+    df = pd.DataFrame(body, columns=header).set_index(METRIC_COL)
+    df.index = df.index.str.strip()
+    df.columns = df.columns.str.strip()
+    df = df.loc[:, [c for c in df.columns if c and not c.startswith("Column ")]]
+    return _dedupe_index(df)
  
  
 def build_numeric(raw: pd.DataFrame):
@@ -395,12 +459,14 @@ ensure_seed_csv()
 # ---- Sidebar: data source -------------------------------------------------- #
 with st.sidebar:
     st.header("Data")
-    source_choice = st.radio("Source", ["Bundled file", "Upload a CSV"], index=0)
+    source_choice = st.radio("Source", ["Bundled file", "Upload a file"], index=0)
  
     upload = None
-    if source_choice == "Upload a CSV":
+    if source_choice == "Upload a file":
         upload = st.file_uploader(
-            "CSV: first column = metric name, other columns = banks", type=["csv"]
+            "First column = metric name, other columns = banks "
+            "(CSV or Excel — first sheet is used)",
+            type=["csv", "xlsx"],
         )
  
     if st.button("🔄 Reload data", use_container_width=True):
@@ -409,7 +475,10 @@ with st.sidebar:
 # ---- Load ------------------------------------------------------------------ #
 try:
     if upload is not None:
-        raw = load_raw(io.StringIO(upload.getvalue().decode("utf-8")))
+        if upload.name.lower().endswith(".xlsx"):
+            raw = load_raw_xlsx(io.BytesIO(upload.getvalue()))
+        else:
+            raw = load_raw(io.StringIO(upload.getvalue().decode("utf-8")))
         source_label = upload.name
     else:
         raw = load_raw(CSV_PATH)
@@ -609,4 +678,3 @@ upload), so it stays in sync automatically:
 No code changes needed for new rows or columns.
         """
     )
- 
