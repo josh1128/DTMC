@@ -10,9 +10,14 @@ metric name and every OTHER column is an entity (bank). It then:
   * auto-detects each metric's format (currency / percent / number)
   * renders a formatted table, a normalized heatmap, and one chart per metric
  
+Charts are grouped into TWO topic pages -- "Financial Performance" and
+"Capital, Liquidity & Credit Quality" -- shown side by side in a landscape
+2-column grid so each page fits on screen without scrolling. The PDF report
+uses the same grouping: one landscape page of charts per topic.
+ 
 Because nothing about the banks or the metrics is hardcoded, ADDING A NEW ROW
 (metric) or a NEW COLUMN (bank) to the CSV and reloading the app makes it show
-up everywhere automatically.
+up everywhere automatically (new metrics are auto-assigned to a topic page).
  
 Run with:  streamlit run app.py
 """
@@ -69,6 +74,40 @@ SEED_ROWS = [
 ]
  
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
+ 
+# --------------------------------------------------------------------------- #
+# Topic grouping (drives the 2 chart pages on screen and in the PDF)
+# --------------------------------------------------------------------------- #
+# A metric goes to "Financial Performance" if it's a currency metric or its
+# name matches one of these keywords; everything else lands in the second
+# topic. New CSV rows are therefore auto-assigned -- no code changes needed.
+PERFORMANCE_KEYWORDS = ("revenue", "income", "earnings", "profit", "margin",
+                        "yoy", "growth", "eps", "roe", "roa")
+ 
+TOPIC_PERFORMANCE = "Financial Performance"
+TOPIC_RISK = "Capital, Liquidity & Credit Quality"
+ 
+ 
+def group_metrics_by_topic(metrics, formats) -> list[tuple[str, list[str]]]:
+    """Split metrics into the two topic pages.
+ 
+    Returns [(topic_name, [metrics...]), ...] preserving metric order. If the
+    keyword rules put everything into one bucket, fall back to an even split
+    so both pages are still useful.
+    """
+    perf, risk = [], []
+    for m in metrics:
+        name = m.lower()
+        if formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
+            perf.append(m)
+        else:
+            risk.append(m)
+ 
+    if metrics and (not perf or not risk):
+        half = math.ceil(len(metrics) / 2)
+        perf, risk = list(metrics[:half]), list(metrics[half:])
+ 
+    return [(TOPIC_PERFORMANCE, perf), (TOPIC_RISK, risk)]
  
  
 # --------------------------------------------------------------------------- #
@@ -174,13 +213,14 @@ def _metric_png(metric: str, num_v: pd.DataFrame, fmt: str) -> bytes | None:
  
 def build_pdf_report(raw_v: pd.DataFrame, num_v: pd.DataFrame,
                      formats: dict, source_label: str) -> bytes:
-    """Assemble a landscape PDF: title, comparison table, one chart per metric."""
+    """Assemble a LANDSCAPE PDF: title + comparison table on page 1, then the
+    charts grouped by topic -- one landscape page per topic (2 pages of charts)."""
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                                    Table, TableStyle, Image)
+                                    Table, TableStyle, Image, PageBreak)
  
     metrics = list(raw_v.index)
     banks = list(raw_v.columns)
@@ -237,35 +277,41 @@ def build_pdf_report(raw_v: pd.DataFrame, num_v: pd.DataFrame,
     for c, r in red_cells:
         style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(NEG)))
     table.setStyle(TableStyle(style))
-    story += [table, Spacer(1, 16),
-              Paragraph("Per-metric comparison", styles["Heading2"]),
-              Spacer(1, 4)]
+    story.append(table)
  
-    # --- Charts: two per row.
+    # --- Charts grouped by topic: each topic starts on its own landscape page.
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.6
-    pair = []
-    chart_rows = []
-    for metric in metrics:
-        png = _metric_png(metric, num_v, formats[metric])
-        if png is None:
+ 
+    for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
+        if not topic_metrics:
             continue
-        pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
-        if len(pair) == 2:
+        story += [PageBreak(),
+                  Paragraph(topic, styles["Heading2"]),
+                  Spacer(1, 4)]
+ 
+        pair = []
+        chart_rows = []
+        for metric in topic_metrics:
+            png = _metric_png(metric, num_v, formats[metric])
+            if png is None:
+                continue
+            pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
+            if len(pair) == 2:
+                chart_rows.append(pair)
+                pair = []
+        if pair:
+            pair.append("")
             chart_rows.append(pair)
-            pair = []
-    if pair:
-        pair.append("")
-        chart_rows.append(pair)
-    if chart_rows:
-        grid = Table(chart_rows, colWidths=[img_w + 0.1 * inch] * 2)
-        grid.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ]))
-        story.append(grid)
+        if chart_rows:
+            grid = Table(chart_rows, colWidths=[img_w + 0.1 * inch] * 2)
+            grid.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]))
+            story.append(grid)
  
     def _footer(canvas, doc):
         canvas.saveState()
@@ -401,8 +447,8 @@ num_v = numeric.loc[sel_metrics, sel_banks]
 with st.sidebar:
     st.divider()
     st.header("Report")
-    st.caption("Exports the table and charts for the currently selected "
-               "banks and metrics.")
+    st.caption("Exports the table and charts (grouped by topic, one landscape "
+               "page each) for the currently selected banks and metrics.")
     try:
         report_bytes = get_report_bytes(
             raw_v.reset_index().to_csv(index=False),
@@ -474,49 +520,71 @@ with tab_heat:
                        yaxis=dict(autorange="reversed"))
     st.plotly_chart(heat, use_container_width=True)
  
-# ----- Charts (one per metric) --------------------------------------------- #
+ 
+# ----- Charts (2 topic pages, landscape 2-column grid) ---------------------- #
+def _metric_bar_fig(metric: str, fmt: str) -> go.Figure | None:
+    """Build the on-screen Plotly bar chart for one metric (compact height so a
+    full topic page fits on screen without scrolling)."""
+    series = num_v.loc[metric].dropna()
+    if series.empty:
+        return None
+ 
+    frame = series.reset_index()
+    frame.columns = ["Bank", "Value"]
+    if sort_charts:
+        frame = frame.sort_values("Value", ascending=False)
+ 
+    diverging = (frame["Value"] < 0).any()  # YoY-style metrics
+    if diverging:
+        colors = [POS if v >= 0 else NEG for v in frame["Value"]]
+    else:
+        colors = [ACCENT] * len(frame)
+    if highlight != "(none)":
+        colors = ["#e08a1e" if b == highlight else c
+                  for b, c in zip(frame["Bank"], colors)]
+ 
+    if fmt == "currency":
+        texttmpl, hovertmpl, axfmt = "$%{y:,.0f}", "%{x}<br>$%{y:,.0f}<extra></extra>", "$,.0f"
+    elif fmt == "percent":
+        texttmpl, hovertmpl, axfmt = "%{y:.2f}%", "%{x}<br>%{y:.2f}%<extra></extra>", ".1f"
+    else:
+        texttmpl, hovertmpl, axfmt = "%{y:,.2f}", "%{x}<br>%{y:,.2f}<extra></extra>", ",.2f"
+ 
+    fig = go.Figure(go.Bar(
+        x=frame["Bank"], y=frame["Value"],
+        marker_color=colors, text=frame["Value"],
+        texttemplate=texttmpl, textposition="outside",
+        hovertemplate=hovertmpl, cliponaxis=False,
+    ))
+    fig.update_layout(
+        title=dict(text=metric, font=dict(size=14)),
+        height=300, margin=dict(l=10, r=10, t=42, b=10),
+        yaxis=dict(tickformat=axfmt, title=""), xaxis=dict(title=""),
+        showlegend=False,
+    )
+    return fig
+ 
+ 
 with tab_charts:
-    cols = st.columns(2)
-    for i, metric in enumerate(sel_metrics):
-        fmt = formats[metric]
-        series = num_v.loc[metric].dropna()
-        if series.empty:
-            continue
+    topic_pages = [(t, ms) for t, ms in group_metrics_by_topic(sel_metrics, formats) if ms]
  
-        frame = series.reset_index()
-        frame.columns = ["Bank", "Value"]
-        if sort_charts:
-            frame = frame.sort_values("Value", ascending=False)
- 
-        diverging = (frame["Value"] < 0).any()  # YoY-style metrics
-        if diverging:
-            colors = [POS if v >= 0 else NEG for v in frame["Value"]]
-        else:
-            colors = [ACCENT] * len(frame)
-        if highlight != "(none)":
-            colors = ["#e08a1e" if b == highlight else c
-                      for b, c in zip(frame["Bank"], colors)]
- 
-        if fmt == "currency":
-            texttmpl, hovertmpl, axfmt = "$%{y:,.0f}", "%{x}<br>$%{y:,.0f}<extra></extra>", "$,.0f"
-        elif fmt == "percent":
-            texttmpl, hovertmpl, axfmt = "%{y:.2f}%", "%{x}<br>%{y:.2f}%<extra></extra>", ".1f"
-        else:
-            texttmpl, hovertmpl, axfmt = "%{y:,.2f}", "%{x}<br>%{y:,.2f}<extra></extra>", ",.2f"
- 
-        fig = go.Figure(go.Bar(
-            x=frame["Bank"], y=frame["Value"],
-            marker_color=colors, text=frame["Value"],
-            texttemplate=texttmpl, textposition="outside",
-            hovertemplate=hovertmpl, cliponaxis=False,
-        ))
-        fig.update_layout(
-            title=dict(text=metric, font=dict(size=15)),
-            height=360, margin=dict(l=10, r=10, t=46, b=10),
-            yaxis=dict(tickformat=axfmt, title=""), xaxis=dict(title=""),
-            showlegend=False,
-        )
-        cols[i % 2].plotly_chart(fig, use_container_width=True)
+    if not topic_pages:
+        st.info("No chartable metrics in the current selection.")
+    else:
+        page_tabs = st.tabs([f"{'📈' if t == TOPIC_PERFORMANCE else '🛡️'} {t} "
+                             f"({len(ms)})" for t, ms in topic_pages])
+        for page_tab, (topic, page_metrics) in zip(page_tabs, topic_pages):
+            with page_tab:
+                cols = st.columns(2)
+                shown = 0
+                for metric in page_metrics:
+                    fig = _metric_bar_fig(metric, formats[metric])
+                    if fig is None:
+                        continue
+                    cols[shown % 2].plotly_chart(fig, use_container_width=True)
+                    shown += 1
+                if shown == 0:
+                    st.info("No numeric values to chart for this topic.")
  
 # --------------------------------------------------------------------------- #
 st.divider()
@@ -531,11 +599,13 @@ upload), so it stays in sync automatically:
   in every chart.
 * **Add a metric** → add a new **row** under the `{METRIC_COL}` column. Use `$`
   for currency and `%` for percentage values — the app detects the format and a
-  new chart is generated for it.
+  new chart is generated for it. Charts are grouped into two topic pages:
+  currency metrics and names containing words like *revenue*, *income*, or
+  *YoY* land in **{TOPIC_PERFORMANCE}**; everything else goes to
+  **{TOPIC_RISK}**.
 * **Missing / qualitative values** → use `NA`, `N/A`, `-`, or free text like
   `Meets Req`; these are skipped in charts and shown verbatim in the table.
  
 No code changes needed for new rows or columns.
         """
     )
- 
