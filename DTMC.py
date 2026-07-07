@@ -51,31 +51,12 @@ def make_unique_index(index):
 def clean_metric_name(metric):
     metric = str(metric)
 
-    # Remove duplicate suffix for display/grouping, e.g. YoY (%) (2) -> YoY (%)
     if metric.endswith(")") and " (" in metric:
         base, suffix = metric.rsplit(" (", 1)
         if suffix[:-1].isdigit():
             return base
 
     return metric
-
-
-def group_metrics_by_topic(metrics, formats):
-    perf, risk = [], []
-
-    for m in metrics:
-        name = clean_metric_name(m).lower()
-
-        if formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
-            perf.append(m)
-        else:
-            risk.append(m)
-
-    if metrics and (not perf or not risk):
-        half = math.ceil(len(metrics) / 2)
-        perf, risk = list(metrics[:half]), list(metrics[half:])
-
-    return [(TOPIC_PERFORMANCE, perf), (TOPIC_RISK, risk)]
 
 
 def parse_value(raw):
@@ -151,12 +132,29 @@ def format_value(value, fmt, original=""):
         return f"${value:,.0f}"
 
     if fmt == "percent":
-        # Excel stores percentages as decimals, e.g. -6.40% as -0.064
         if abs(value) <= 1:
             value = value * 100
         return f"{value:.2f}%"
 
     return f"{value:,.2f}"
+
+
+def group_metrics_by_topic(metrics, formats):
+    perf, risk = [], []
+
+    for m in metrics:
+        name = clean_metric_name(m).lower()
+
+        if formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
+            perf.append(m)
+        else:
+            risk.append(m)
+
+    if metrics and (not perf or not risk):
+        half = math.ceil(len(metrics) / 2)
+        perf, risk = list(metrics[:half]), list(metrics[half:])
+
+    return [(TOPIC_PERFORMANCE, perf), (TOPIC_RISK, risk)]
 
 
 def load_raw(source):
@@ -169,7 +167,6 @@ def load_raw(source):
 
     df = df.rename(columns={df.columns[0]: METRIC_COL})
     df = df.set_index(METRIC_COL)
-
     df.index = make_unique_index(df.index)
 
     return df
@@ -190,257 +187,6 @@ def build_numeric(raw):
     )
 
     return numeric.astype("float64"), formats
-
-
-def _metric_png(metric, num_v, fmt):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter
-
-    row_position = list(num_v.index).index(metric)
-    series = num_v.iloc[row_position].dropna().sort_values(ascending=False)
-
-    if series.empty:
-        return None
-
-    values = series.values
-    labels = list(series.index)
-
-    if fmt == "percent" and abs(pd.Series(values)).max() <= 1:
-        values = values * 100
-
-    diverging = (values < 0).any()
-    bar_colors = [POS if v >= 0 else NEG for v in values] if diverging else [ACCENT] * len(values)
-
-    fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
-    bars = ax.bar(labels, values, color=bar_colors)
-
-    ax.set_title(clean_metric_name(metric), fontsize=10, fontweight="bold")
-    ax.axhline(0, color="#888888", linewidth=0.6)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.tick_params(axis="x", labelrotation=45, labelsize=7)
-
-    for lbl in ax.get_xticklabels():
-        lbl.set_ha("right")
-
-    ax.tick_params(axis="y", labelsize=7)
-
-    if fmt == "currency":
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:,.0f}"))
-        labeller = lambda v: f"${v:,.0f}"
-    elif fmt == "percent":
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}%"))
-        labeller = lambda v: f"{v:.2f}%"
-    else:
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.2f}"))
-        labeller = lambda v: f"{v:,.2f}"
-
-    ax.bar_label(bars, labels=[labeller(v) for v in values], fontsize=6, padding=2)
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
-
-    return buf.getvalue()
-
-
-def build_pdf_report(raw_v, num_v, formats, source_label):
-    from reportlab.lib.pagesizes import letter, landscape
-    from reportlab.lib.units import inch
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table,
-        TableStyle, Image, PageBreak
-    )
-
-    metrics = list(raw_v.index)
-    banks = list(raw_v.columns)
-
-    page_w, page_h = landscape(letter)
-    margin = 0.5 * inch
-    avail_w = page_w - 2 * margin
-
-    styles = getSampleStyleSheet()
-
-    h_cell = ParagraphStyle(
-        "hcell",
-        parent=styles["Normal"],
-        fontSize=6.5,
-        leading=8,
-        textColor=colors.white,
-        fontName="Helvetica-Bold",
-    )
-
-    row_lbl = ParagraphStyle(
-        "rowlbl",
-        parent=styles["Normal"],
-        fontSize=7,
-        leading=8,
-        fontName="Helvetica-Bold",
-    )
-
-    subtitle = ParagraphStyle(
-        "sub",
-        parent=styles["Normal"],
-        fontSize=8,
-        textColor=colors.HexColor("#666666"),
-    )
-
-    story = [
-        Paragraph("DTMC Stats Report", styles["Title"]),
-        Paragraph(
-            f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
-            f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
-            f"&nbsp;|&nbsp; source: {source_label}",
-            subtitle,
-        ),
-        Spacer(1, 10),
-    ]
-
-    header = [Paragraph("Bank", h_cell)] + [
-        Paragraph(clean_metric_name(m), h_cell) for m in metrics
-    ]
-
-    table_data = [header]
-    red_cells = []
-
-    for r, bank in enumerate(banks, start=1):
-        cells = [Paragraph(bank, row_lbl)]
-
-        for c, metric in enumerate(metrics, start=1):
-            val = num_v.iloc[c - 1, r - 1]
-            original = raw_v.iloc[c - 1, r - 1]
-
-            cells.append(format_value(val, formats[metric], original))
-
-            if pd.notna(val) and val < 0:
-                red_cells.append((c, r))
-
-        table_data.append(cells)
-
-    first_w = 1.0 * inch
-    other_w = (avail_w - first_w) / max(len(metrics), 1)
-
-    table = Table(
-        table_data,
-        colWidths=[first_w] + [other_w] * len(metrics),
-        repeatRows=1,
-    )
-
-    style = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(ACCENT)),
-        ("FONTSIZE", (0, 1), (-1, -1), 7),
-        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f7f9")]),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]
-
-    for c, r in red_cells:
-        style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(NEG)))
-
-    table.setStyle(TableStyle(style))
-    story.append(table)
-
-    img_w = (avail_w - 0.2 * inch) / 2
-    img_h = img_w * 0.6
-
-    for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
-        if not topic_metrics:
-            continue
-
-        story += [
-            PageBreak(),
-            Paragraph(topic, styles["Heading2"]),
-            Spacer(1, 4),
-        ]
-
-        pair = []
-        chart_rows = []
-
-        for metric in topic_metrics:
-            png = _metric_png(metric, num_v, formats[metric])
-
-            if png is None:
-                continue
-
-            pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
-
-            if len(pair) == 2:
-                chart_rows.append(pair)
-                pair = []
-
-        if pair:
-            pair.append("")
-            chart_rows.append(pair)
-
-        if chart_rows:
-            grid = Table(chart_rows, colWidths=[img_w + 0.1 * inch] * 2)
-            grid.setStyle(TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ]))
-
-            story.append(grid)
-
-    def _footer(canvas, doc):
-        canvas.saveState()
-        canvas.setFont("Helvetica", 7)
-        canvas.setFillColor(colors.HexColor("#999999"))
-        canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
-        canvas.drawString(margin, 0.3 * inch, "DTMC Stats Report")
-        canvas.restoreState()
-
-    buf = io.BytesIO()
-
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=landscape(letter),
-        leftMargin=margin,
-        rightMargin=margin,
-        topMargin=margin,
-        bottomMargin=0.6 * inch,
-        title="DTMC Stats Report",
-    )
-
-    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
-
-    return buf.getvalue()
-
-
-@st.cache_data(show_spinner="Building PDF report…")
-def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label):
-    df = pd.read_csv(
-        io.StringIO(raw_csv),
-        dtype=str,
-        keep_default_na=False
-    ).fillna("")
-
-    df = df.rename(columns={df.columns[0]: METRIC_COL})
-    df = df.set_index(METRIC_COL)
-    df.index = make_unique_index(df.index)
-
-    raw_v = df.loc[list(metrics), list(banks)]
-    formats = dict(formats_items)
-
-    numeric_rows = []
-
-    for _, row in raw_v.iterrows():
-        numeric_rows.append([parse_value(v) for v in row])
-
-    num_v = pd.DataFrame(
-        numeric_rows,
-        index=raw_v.index,
-        columns=raw_v.columns
-    ).astype("float64")
-
-    return build_pdf_report(raw_v, num_v, formats, source_label)
 
 
 st.set_page_config(
@@ -506,7 +252,6 @@ numeric, formats = build_numeric(raw)
 all_banks = list(raw.columns)
 all_metrics = list(raw.index)
 
-
 with st.sidebar:
     st.header("Filters")
 
@@ -541,40 +286,6 @@ if not sel_banks or not sel_metrics:
 raw_v = raw.loc[sel_metrics, sel_banks]
 num_v = numeric.loc[sel_metrics, sel_banks]
 
-
-with st.sidebar:
-    st.divider()
-    st.header("Report")
-
-    try:
-        csv_df = raw_v.reset_index()
-        csv_df = csv_df.rename(columns={csv_df.columns[0]: METRIC_COL})
-
-        report_bytes = get_report_bytes(
-            csv_df.to_csv(index=False),
-            tuple((m, formats[m]) for m in sel_metrics),
-            tuple(sel_metrics),
-            tuple(sel_banks),
-            source_label,
-        )
-
-        st.download_button(
-            "📄 Download report (PDF)",
-            data=report_bytes,
-            file_name=f"dtmc_stats_report_{datetime.now():%Y%m%d}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
-    except ModuleNotFoundError as exc:
-        st.warning(
-            f"PDF export needs `{exc.name}`. Install with `pip install reportlab matplotlib`."
-        )
-
-    except Exception as exc:
-        st.error(f"Could not build the PDF: {exc}")
-
-
 tab_charts, tab_table, tab_heat = st.tabs([
     "📊 Charts",
     "📋 Table",
@@ -597,19 +308,8 @@ with tab_table:
                 raw_v.iloc[i, j],
             )
 
-    neg_mask = pd.DataFrame(
-        num_v.values < 0,
-        index=display.index,
-        columns=display.columns
-    )
-
-    def _style(_):
-        css = pd.DataFrame("", index=display.index, columns=display.columns)
-        css[neg_mask] = f"color: {NEG}; font-weight: 600;"
-        return css
-
     st.dataframe(
-        display.style.apply(_style, axis=None),
+        display,
         use_container_width=True,
     )
 
@@ -617,7 +317,7 @@ with tab_table:
 with tab_heat:
     norm = num_v.copy()
 
-    for i, m in enumerate(norm.index):
+    for i, _ in enumerate(norm.index):
         row = norm.iloc[i]
         lo = row.min()
         hi = row.max()
@@ -757,7 +457,7 @@ with st.expander("➕ How to update the dashboard"):
 The dashboard is driven by **DTMC stats.xlsx**.
 
 - Put **DTMC stats.xlsx** in the same GitHub repository folder as `DTMC.py`.
-- The first column should contain metrics, like `Revenue`, `YoY (%)`, `CET 1 ratio`, etc.
+- The first column should contain metrics.
 - The remaining columns should contain banks.
 - Add a new column to add a bank.
 - Add a new row to add a metric.
