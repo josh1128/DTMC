@@ -9,37 +9,22 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bank_metrics.csv")
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+EXCEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "DTMC stats.xlsx"
+)
+
 METRIC_COL = "Metric"
-
-BANKS = ["TD", "RBC", "BNS", "BMO", "CIBC", "NBC", "LBC", "Desjardins",
-         "ATB", "BNP Paribas", "Merrill Lynch", "Citibank NA"]
-
-SEED_ROWS = [
-    ("Revenue", ["$59,180", "$65,717", "$34,216", "$34,683", "$28,897", "$14,023",
-                 "$884", "$15,620", "$2,433", "$49,081", "$107,422", "$78,734"]),
-    ("Revenue YoY (%)", ["-6.4%", "5.5%", "8.14%", "6.20%", "7.86%", "10.12%",
-                         "-4.16%", "11.07%", "17.82%", "2.39%", "2.02%", "4.00%"]),
-    ("Net Income", ["$14,910", "$22,138", "$9,548", "$9,731", "$9,818", "$4,612",
-                    "$27", "$3,321", "$542", "$12,491", "$31,733", "$16,027"]),
-    ("Net Income YoY (%)", ["-27.4%", "8.7%", "22.58%", "11.73%", "16.48%", "14.81%",
-                            "-80.06%", "14.71%", "56.19%", "2.18%", "4.01%", "12.03%"]),
-    ("CET1 Ratio (%)", ["14.5%", "13.7%", "13.3%", "13.0%", "13.4%", "13.7%",
-                        "11.0%", "23.2%", "11.9%", "12.8%", "11.2%", "12.7%"]),
-    ("LCR (%)", ["142%", "126%", "124%", "128%", "133%", "189%",
-                 "Meets Req", "167%", "129%", "134%", "113%", "114%"]),
-    ("Gross NPAs/Customer Loans + OREO (%)", ["0.56%", "0.86%", "0.99%", "1.07%",
-                                               "0.64%", "1.23%", "1.18%", "0.80%",
-                                               "NA", "2.97%", "0.98%", "1.09%"]),
-    ("New Loan Loss Prov/Avg Customer Loans (%)", ["0.47%", "0.43%", "0.61%", "0.45%",
-                                                   "0.41%", "0.45%", "0.17%", "0.20%",
-                                                   "0.22%", "0.40%", "0.48%", "1.39%"]),
-]
 
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
 
-PERFORMANCE_KEYWORDS = ("revenue", "income", "earnings", "profit", "margin",
-                        "yoy", "growth", "eps", "roe", "roa")
+PERFORMANCE_KEYWORDS = (
+    "revenue", "income", "earnings", "profit", "margin",
+    "yoy", "growth", "eps", "roe", "roa"
+)
 
 TOPIC_PERFORMANCE = "Financial Performance"
 TOPIC_RISK = "Capital, Liquidity & Credit Quality"
@@ -49,7 +34,10 @@ POS = "#2a9d4a"
 NEG = "#c0392b"
 
 
-def group_metrics_by_topic(metrics, formats) -> list[tuple[str, list[str]]]:
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def group_metrics_by_topic(metrics, formats):
     perf, risk = [], []
 
     for m in metrics:
@@ -107,7 +95,7 @@ def detect_format(raw_values) -> str:
     return "number"
 
 
-def format_value(value: float | None, fmt: str, original: str = "") -> str:
+def format_value(value, fmt, original="") -> str:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return str(original) if original not in (None, "") else "—"
 
@@ -120,6 +108,41 @@ def format_value(value: float | None, fmt: str, original: str = "") -> str:
     return f"{value:,.2f}"
 
 
+def load_raw(source) -> pd.DataFrame:
+    df = pd.read_excel(
+        source,
+        dtype=str,
+        keep_default_na=False,
+        engine="openpyxl"
+    ).fillna("")
+
+    if METRIC_COL not in df.columns:
+        df = df.rename(columns={df.columns[0]: METRIC_COL})
+
+    df = df.set_index(METRIC_COL)
+    df.index = df.index.astype(str).str.strip()
+
+    return df
+
+
+def build_numeric(raw: pd.DataFrame):
+    formats = {m: detect_format(raw.loc[m].tolist()) for m in raw.index}
+
+    numeric = raw.apply(
+        lambda row: [parse_value(v) for v in row],
+        axis=1,
+        result_type="expand"
+    )
+
+    numeric.columns = raw.columns
+    numeric.index = raw.index
+
+    return numeric.astype("float64"), formats
+
+
+# --------------------------------------------------------------------------- #
+# PDF helpers
+# --------------------------------------------------------------------------- #
 def _metric_png(metric: str, num_v: pd.DataFrame, fmt: str) -> bytes | None:
     import matplotlib
     matplotlib.use("Agg")
@@ -169,20 +192,14 @@ def _metric_png(metric: str, num_v: pd.DataFrame, fmt: str) -> bytes | None:
     return buf.getvalue()
 
 
-def build_pdf_report(raw_v: pd.DataFrame, num_v: pd.DataFrame,
-                     formats: dict, source_label: str) -> bytes:
+def build_pdf_report(raw_v, num_v, formats, source_label) -> bytes:
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import (
-        SimpleDocTemplate,
-        Paragraph,
-        Spacer,
-        Table,
-        TableStyle,
-        Image,
-        PageBreak,
+        SimpleDocTemplate, Paragraph, Spacer, Table,
+        TableStyle, Image, PageBreak
     )
 
     metrics = list(raw_v.index)
@@ -320,7 +337,7 @@ def build_pdf_report(raw_v: pd.DataFrame, num_v: pd.DataFrame,
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.HexColor("#999999"))
         canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
-        canvas.drawString(margin, 0.3 * inch, "Bank Metrics Report — in MM (CAD)")
+        canvas.drawString(margin, 0.3 * inch, "Bank Metrics Report")
         canvas.restoreState()
 
     buf = io.BytesIO()
@@ -341,20 +358,17 @@ def build_pdf_report(raw_v: pd.DataFrame, num_v: pd.DataFrame,
 
 
 @st.cache_data(show_spinner="Building PDF report…")
-def get_report_bytes(raw_csv: str, formats_items: tuple,
-                     metrics: tuple, banks: tuple, source_label: str) -> bytes:
+def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label) -> bytes:
     df = pd.read_csv(
         io.StringIO(raw_csv),
         dtype=str,
-        keep_default_na=False,
+        keep_default_na=False
     ).fillna("")
 
-    # FIX: guarantee the first column is called Metric
     if METRIC_COL not in df.columns:
         df = df.rename(columns={df.columns[0]: METRIC_COL})
 
     raw_v = df.set_index(METRIC_COL)
-
     raw_v.index = raw_v.index.astype(str).str.strip()
 
     raw_v = raw_v.loc[list(metrics), list(banks)]
@@ -364,7 +378,7 @@ def get_report_bytes(raw_csv: str, formats_items: tuple,
     num_v = raw_v.apply(
         lambda row: [parse_value(v) for v in row],
         axis=1,
-        result_type="expand",
+        result_type="expand"
     ).astype("float64")
 
     num_v.columns = raw_v.columns
@@ -373,111 +387,78 @@ def get_report_bytes(raw_csv: str, formats_items: tuple,
     return build_pdf_report(raw_v, num_v, formats, source_label)
 
 
-def ensure_seed_csv() -> None:
-    if os.path.exists(CSV_PATH):
-        return
-
-    data = {METRIC_COL: [name for name, _ in SEED_ROWS]}
-
-    for i, bank in enumerate(BANKS):
-        data[bank] = [vals[i] for _, vals in SEED_ROWS]
-
-    pd.DataFrame(data).to_csv(CSV_PATH, index=False)
-
-
-def load_raw(source) -> pd.DataFrame:
-    df = pd.read_csv(
-        source,
-        dtype=str,
-        keep_default_na=False,
-    ).fillna("")
-
-    # Guarantees first column is Metric, even if CSV uses index/Unnamed/etc.
-    if METRIC_COL not in df.columns:
-        df = df.rename(columns={df.columns[0]: METRIC_COL})
-
-    df = df.set_index(METRIC_COL)
-    df.index = df.index.astype(str).str.strip()
-
-    return df
-
-
-def build_numeric(raw: pd.DataFrame):
-    formats = {m: detect_format(raw.loc[m].tolist()) for m in raw.index}
-
-    numeric = raw.apply(
-        lambda row: [parse_value(v) for v in row],
-        axis=1,
-        result_type="expand",
-    )
-
-    numeric.columns = raw.columns
-    numeric.index = raw.index
-
-    return numeric.astype("float64"), formats
-
-
+# --------------------------------------------------------------------------- #
+# Streamlit UI
+# --------------------------------------------------------------------------- #
 st.set_page_config(
-    page_title="Bank Metrics Dashboard",
+    page_title="DTMC Stats Dashboard",
     page_icon="🏦",
     layout="wide",
 )
 
-st.title("🏦 Bank Metrics Dashboard")
+st.title("🏦 DTMC Stats Dashboard")
 
 st.caption(
-    "In MM (CAD) unless the metric name says otherwise. "
-    "This view is generated from the data file — add a row or column and it appears automatically."
+    "This dashboard reads data from DTMC stats.xlsx in the GitHub repository. "
+    "The first column should contain metric names, and the remaining columns should contain banks/entities."
 )
-
-ensure_seed_csv()
 
 with st.sidebar:
     st.header("Data")
 
     source_choice = st.radio(
         "Source",
-        ["Bundled file", "Upload a CSV"],
+        ["Bundled Excel file", "Upload Excel file"],
         index=0,
     )
 
     upload = None
 
-    if source_choice == "Upload a CSV":
+    if source_choice == "Upload Excel file":
         upload = st.file_uploader(
-            "CSV: first column = metric name, other columns = banks",
-            type=["csv"],
+            "Excel file: first column = metric name, other columns = banks/entities",
+            type=["xlsx"],
         )
 
     if st.button("🔄 Reload data", use_container_width=True):
         st.rerun()
 
+
 try:
     if upload is not None:
-        raw = load_raw(io.StringIO(upload.getvalue().decode("utf-8")))
+        raw = load_raw(upload)
         source_label = upload.name
     else:
-        raw = load_raw(CSV_PATH)
-        source_label = os.path.basename(CSV_PATH)
+        raw = load_raw(EXCEL_PATH)
+        source_label = os.path.basename(EXCEL_PATH)
+
+except FileNotFoundError:
+    st.error(
+        "Could not find `DTMC stats.xlsx`. Make sure it is in the same GitHub repository folder as `app.py`."
+    )
+    st.stop()
 
 except Exception as exc:
-    st.error(f"Could not read the data: {exc}")
+    st.error(f"Could not read the Excel file: {exc}")
     st.stop()
 
+
 if raw.empty or raw.shape[1] == 0:
-    st.warning("The file has no bank columns yet.")
+    st.warning("The Excel file has no bank/entity columns yet.")
     st.stop()
+
 
 numeric, formats = build_numeric(raw)
 
 all_banks = list(raw.columns)
 all_metrics = list(raw.index)
 
+
 with st.sidebar:
     st.header("Filters")
 
     sel_banks = st.multiselect(
-        "Banks",
+        "Banks / Entities",
         all_banks,
         default=all_banks,
     )
@@ -493,28 +474,26 @@ with st.sidebar:
     sort_charts = st.checkbox("Sort bars by value", value=True)
 
     highlight = st.selectbox(
-        "Highlight a bank",
+        "Highlight a bank/entity",
         ["(none)"] + sel_banks,
         index=0,
     )
 
+
 if not sel_banks or not sel_metrics:
-    st.info("Pick at least one bank and one metric in the sidebar.")
+    st.info("Pick at least one bank/entity and one metric in the sidebar.")
     st.stop()
+
 
 raw_v = raw.loc[sel_metrics, sel_banks]
 num_v = numeric.loc[sel_metrics, sel_banks]
+
 
 with st.sidebar:
     st.divider()
     st.header("Report")
 
-    st.caption(
-        "Exports the table and charts for the currently selected banks and metrics."
-    )
-
     try:
-        # FIX: ensure reset index column is always called Metric
         csv_df = raw_v.reset_index()
         csv_df = csv_df.rename(columns={csv_df.columns[0]: METRIC_COL})
 
@@ -529,7 +508,7 @@ with st.sidebar:
         st.download_button(
             "📄 Download report (PDF)",
             data=report_bytes,
-            file_name=f"bank_metrics_report_{datetime.now():%Y%m%d}.pdf",
+            file_name=f"dtmc_stats_report_{datetime.now():%Y%m%d}.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
@@ -578,16 +557,8 @@ with tab_table:
         use_container_width=True,
     )
 
-    st.caption(
-        "Negative values are shown in red. Non-numeric entries like 'Meets Req' are kept as-is."
-    )
-
 
 with tab_heat:
-    st.caption(
-        "Each metric is min-max normalized across selected banks. Darker = higher within that row."
-    )
-
     norm = num_v.copy()
 
     for m in norm.index:
@@ -622,7 +593,7 @@ with tab_heat:
     st.plotly_chart(heat, use_container_width=True)
 
 
-def _metric_bar_fig(metric: str, fmt: str) -> go.Figure | None:
+def _metric_bar_fig(metric: str, fmt: str):
     series = num_v.loc[metric].dropna()
 
     if series.empty:
@@ -720,17 +691,17 @@ with tab_charts:
 
 st.divider()
 
-with st.expander("➕ How to add a bank or a metric"):
+with st.expander("➕ How to update the dashboard"):
     st.markdown(
-        f"""
-The dashboard is driven entirely by **`bank_metrics.csv`** or the CSV you upload.
+        """
+The dashboard is driven by **DTMC stats.xlsx**.
 
-- **Add a bank**: add a new column with the bank name as the header.
-- **Add a metric**: add a new row under the `{METRIC_COL}` column.
+- Put **DTMC stats.xlsx** in the same GitHub repository folder as `app.py`.
+- The **first column** should contain metric names.
+- The remaining columns should contain banks or entities.
+- Add a new column to add a new bank/entity.
+- Add a new row to add a new metric.
 - Use `$` for currency and `%` for percentage values.
-- Missing or qualitative values can be `NA`, `N/A`, `-`, or text like `Meets Req`.
-- Click **🔄 Reload data** after editing the file.
-
-No code changes are needed for new rows or columns.
+- Use `NA`, `N/A`, `-`, or text like `Meets Req` for unavailable or qualitative values.
         """
     )
