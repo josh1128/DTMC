@@ -31,11 +31,29 @@ POS = "#2a9d4a"
 NEG = "#c0392b"
 
 
+def make_unique_index(index):
+    counts = {}
+    new_index = []
+
+    for item in index:
+        item = str(item).strip()
+
+        if item not in counts:
+            counts[item] = 1
+            new_index.append(item)
+        else:
+            counts[item] += 1
+            new_index.append(f"{item} ({counts[item]})")
+
+    return new_index
+
+
 def group_metrics_by_topic(metrics, formats):
     perf, risk = [], []
 
     for m in metrics:
         name = str(m).lower()
+
         if formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
             perf.append(m)
         else:
@@ -49,8 +67,14 @@ def group_metrics_by_topic(metrics, formats):
 
 
 def parse_value(raw):
-    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+    if raw is None:
         return None
+
+    try:
+        if pd.isna(raw):
+            return None
+    except Exception:
+        pass
 
     s = str(raw).strip()
 
@@ -90,8 +114,16 @@ def detect_format(raw_values):
 
 
 def format_value(value, fmt, original=""):
-    if value is None or (isinstance(value, float) and math.isnan(value)):
-        return str(original) if original not in (None, "") else "—"
+    try:
+        if pd.isna(value):
+            return str(original) if original not in (None, "") else "—"
+    except Exception:
+        return str(original)
+
+    try:
+        value = float(value)
+    except Exception:
+        return str(original)
 
     if fmt == "currency":
         return f"${value:,.0f}"
@@ -110,11 +142,10 @@ def load_raw(source):
         engine="openpyxl"
     ).fillna("")
 
-    # Your first column is the metric column: "In MM (CAD)"
     df = df.rename(columns={df.columns[0]: METRIC_COL})
-
     df = df.set_index(METRIC_COL)
-    df.index = df.index.astype(str).str.strip()
+
+    df.index = make_unique_index(df.index)
 
     return df
 
@@ -248,8 +279,10 @@ def build_pdf_report(raw_v, num_v, formats, source_label):
         cells = [Paragraph(bank, row_lbl)]
 
         for c, metric in enumerate(metrics, start=1):
-            val = num_v.loc[metric, bank]
-            cells.append(format_value(val, formats[metric], raw_v.loc[metric, bank]))
+            val = num_v.iloc[c - 1, r - 1]
+            original = raw_v.iloc[c - 1, r - 1]
+
+            cells.append(format_value(val, formats[metric], original))
 
             if pd.notna(val) and val < 0:
                 red_cells.append((c, r))
@@ -359,22 +392,22 @@ def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label):
     ).fillna("")
 
     df = df.rename(columns={df.columns[0]: METRIC_COL})
+    df = df.set_index(METRIC_COL)
+    df.index = make_unique_index(df.index)
 
-    raw_v = df.set_index(METRIC_COL)
-    raw_v.index = raw_v.index.astype(str).str.strip()
-
-    raw_v = raw_v.loc[list(metrics), list(banks)]
-
+    raw_v = df.loc[list(metrics), list(banks)]
     formats = dict(formats_items)
 
-    num_v = raw_v.apply(
-        lambda row: [parse_value(v) for v in row],
-        axis=1,
-        result_type="expand"
-    ).astype("float64")
+    numeric_rows = []
 
-    num_v.columns = raw_v.columns
-    num_v.index = raw_v.index
+    for _, row in raw_v.iterrows():
+        numeric_rows.append([parse_value(v) for v in row])
+
+    num_v = pd.DataFrame(
+        numeric_rows,
+        index=raw_v.index,
+        columns=raw_v.columns
+    ).astype("float64")
 
     return build_pdf_report(raw_v, num_v, formats, source_label)
 
@@ -423,7 +456,7 @@ try:
 
 except FileNotFoundError:
     st.error(
-        "Could not find `DTMC stats.xlsx`. Make sure it is in the same GitHub repository folder as `app.py`."
+        "Could not find `DTMC stats.xlsx`. Make sure it is in the same GitHub repository folder as `DTMC.py`."
     )
     st.stop()
 
@@ -525,12 +558,12 @@ with tab_table:
         dtype=object,
     )
 
-    for m in raw_v.index:
-        for b in raw_v.columns:
-            display.loc[m, b] = format_value(
-                num_v.loc[m, b],
+    for i, m in enumerate(raw_v.index):
+        for j, b in enumerate(raw_v.columns):
+            display.iloc[i, j] = format_value(
+                num_v.iloc[i, j],
                 formats[m],
-                raw_v.loc[m, b],
+                raw_v.iloc[i, j],
             )
 
     neg_mask = num_v.lt(0)
@@ -549,15 +582,15 @@ with tab_table:
 with tab_heat:
     norm = num_v.copy()
 
-    for m in norm.index:
-        row = norm.loc[m]
+    for i, m in enumerate(norm.index):
+        row = norm.iloc[i]
         lo = row.min()
         hi = row.max()
 
         if pd.isna(lo) or pd.isna(hi) or hi == lo:
-            norm.loc[m] = 0.5
+            norm.iloc[i] = 0.5
         else:
-            norm.loc[m] = (row - lo) / (hi - lo)
+            norm.iloc[i] = (row - lo) / (hi - lo)
 
     heat = go.Figure(
         go.Heatmap(
@@ -582,7 +615,8 @@ with tab_heat:
 
 
 def _metric_bar_fig(metric, fmt):
-    series = num_v.loc[metric].dropna()
+    row_position = list(num_v.index).index(metric)
+    series = num_v.iloc[row_position].dropna()
 
     if series.empty:
         return None
@@ -684,7 +718,7 @@ with st.expander("➕ How to update the dashboard"):
         """
 The dashboard is driven by **DTMC stats.xlsx**.
 
-- Put **DTMC stats.xlsx** in the same GitHub repository folder as `app.py`.
+- Put **DTMC stats.xlsx** in the same GitHub repository folder as `DTMC.py`.
 - The first column should contain metrics, like `Revenue`, `YoY (%)`, `CET 1 ratio`, etc.
 - The remaining columns should contain banks.
 - Add a new column to add a bank.
