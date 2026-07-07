@@ -48,11 +48,23 @@ def make_unique_index(index):
     return new_index
 
 
+def clean_metric_name(metric):
+    metric = str(metric)
+
+    # Remove duplicate suffix for display/grouping, e.g. YoY (%) (2) -> YoY (%)
+    if metric.endswith(")") and " (" in metric:
+        base, suffix = metric.rsplit(" (", 1)
+        if suffix[:-1].isdigit():
+            return base
+
+    return metric
+
+
 def group_metrics_by_topic(metrics, formats):
     perf, risk = [], []
 
     for m in metrics:
-        name = str(m).lower()
+        name = clean_metric_name(m).lower()
 
         if formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
             perf.append(m)
@@ -101,14 +113,24 @@ def parse_value(raw):
     return -value if negative else value
 
 
-def detect_format(raw_values):
+def detect_format(metric_name, raw_values):
+    name = clean_metric_name(metric_name).lower()
     cells = [str(v) for v in raw_values if v is not None]
+
+    currency_keywords = ["revenue", "income"]
+    percent_keywords = [
+        "%", "yoy", "ratio", "lcr", "npas", "loans",
+        "equity price", "cet", "roe", "roa"
+    ]
+
+    if any(k in name for k in currency_keywords):
+        return "currency"
+
+    if any(k in name for k in percent_keywords) or any("%" in c for c in cells):
+        return "percent"
 
     if any("$" in c for c in cells):
         return "currency"
-
-    if any("%" in c for c in cells):
-        return "percent"
 
     return "number"
 
@@ -129,7 +151,10 @@ def format_value(value, fmt, original=""):
         return f"${value:,.0f}"
 
     if fmt == "percent":
-        return f"{value:g}%"
+        # Excel stores percentages as decimals, e.g. -6.40% as -0.064
+        if abs(value) <= 1:
+            value = value * 100
+        return f"{value:.2f}%"
 
     return f"{value:,.2f}"
 
@@ -155,7 +180,7 @@ def build_numeric(raw):
     numeric_rows = []
 
     for metric, row in raw.iterrows():
-        formats[metric] = detect_format(row.tolist())
+        formats[metric] = detect_format(metric, row.tolist())
         numeric_rows.append([parse_value(v) for v in row])
 
     numeric = pd.DataFrame(
@@ -173,13 +198,17 @@ def _metric_png(metric, num_v, fmt):
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
-    series = num_v.loc[metric].dropna().sort_values(ascending=False)
+    row_position = list(num_v.index).index(metric)
+    series = num_v.iloc[row_position].dropna().sort_values(ascending=False)
 
     if series.empty:
         return None
 
-    labels = list(series.index)
     values = series.values
+    labels = list(series.index)
+
+    if fmt == "percent" and abs(pd.Series(values)).max() <= 1:
+        values = values * 100
 
     diverging = (values < 0).any()
     bar_colors = [POS if v >= 0 else NEG for v in values] if diverging else [ACCENT] * len(values)
@@ -187,7 +216,7 @@ def _metric_png(metric, num_v, fmt):
     fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
     bars = ax.bar(labels, values, color=bar_colors)
 
-    ax.set_title(metric, fontsize=10, fontweight="bold")
+    ax.set_title(clean_metric_name(metric), fontsize=10, fontweight="bold")
     ax.axhline(0, color="#888888", linewidth=0.6)
     ax.spines[["top", "right"]].set_visible(False)
     ax.tick_params(axis="x", labelrotation=45, labelsize=7)
@@ -202,7 +231,7 @@ def _metric_png(metric, num_v, fmt):
         labeller = lambda v: f"${v:,.0f}"
     elif fmt == "percent":
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}%"))
-        labeller = lambda v: f"{v:g}%"
+        labeller = lambda v: f"{v:.2f}%"
     else:
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.2f}"))
         labeller = lambda v: f"{v:,.2f}"
@@ -270,9 +299,11 @@ def build_pdf_report(raw_v, num_v, formats, source_label):
         Spacer(1, 10),
     ]
 
-    header = [Paragraph("Bank", h_cell)] + [Paragraph(m, h_cell) for m in metrics]
-    table_data = [header]
+    header = [Paragraph("Bank", h_cell)] + [
+        Paragraph(clean_metric_name(m), h_cell) for m in metrics
+    ]
 
+    table_data = [header]
     red_cells = []
 
     for r, bank in enumerate(banks, start=1):
@@ -553,7 +584,7 @@ tab_charts, tab_table, tab_heat = st.tabs([
 
 with tab_table:
     display = pd.DataFrame(
-        index=raw_v.index,
+        index=[clean_metric_name(m) for m in raw_v.index],
         columns=raw_v.columns,
         dtype=object,
     )
@@ -566,7 +597,11 @@ with tab_table:
                 raw_v.iloc[i, j],
             )
 
-    neg_mask = num_v.lt(0)
+    neg_mask = pd.DataFrame(
+        num_v.values < 0,
+        index=display.index,
+        columns=display.columns
+    )
 
     def _style(_):
         css = pd.DataFrame("", index=display.index, columns=display.columns)
@@ -596,7 +631,7 @@ with tab_heat:
         go.Heatmap(
             z=norm.values,
             x=list(norm.columns),
-            y=list(norm.index),
+            y=[clean_metric_name(m) for m in norm.index],
             colorscale="Teal",
             zmin=0,
             zmax=1,
@@ -620,6 +655,9 @@ def _metric_bar_fig(metric, fmt):
 
     if series.empty:
         return None
+
+    if fmt == "percent" and abs(series).max() <= 1:
+        series = series * 100
 
     frame = series.reset_index()
     frame.columns = ["Bank", "Value"]
@@ -667,7 +705,7 @@ def _metric_bar_fig(metric, fmt):
     )
 
     fig.update_layout(
-        title=dict(text=metric, font=dict(size=14)),
+        title=dict(text=clean_metric_name(metric), font=dict(size=14)),
         height=300,
         margin=dict(l=10, r=10, t=42, b=10),
         yaxis=dict(tickformat=axfmt, title=""),
