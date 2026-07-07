@@ -9,15 +9,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# --------------------------------------------------------------------------- #
-# Config
-# --------------------------------------------------------------------------- #
 EXCEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "DTMC stats.xlsx"
 )
 
-METRIC_COL = "Metric"
+METRIC_COL = "In MM (CAD)"
 
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
 
@@ -34,9 +31,6 @@ POS = "#2a9d4a"
 NEG = "#c0392b"
 
 
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
 def group_metrics_by_topic(metrics, formats):
     perf, risk = [], []
 
@@ -54,7 +48,7 @@ def group_metrics_by_topic(metrics, formats):
     return [(TOPIC_PERFORMANCE, perf), (TOPIC_RISK, risk)]
 
 
-def parse_value(raw) -> float | None:
+def parse_value(raw):
     if raw is None or (isinstance(raw, float) and math.isnan(raw)):
         return None
 
@@ -83,7 +77,7 @@ def parse_value(raw) -> float | None:
     return -value if negative else value
 
 
-def detect_format(raw_values) -> str:
+def detect_format(raw_values):
     cells = [str(v) for v in raw_values if v is not None]
 
     if any("$" in c for c in cells):
@@ -95,7 +89,7 @@ def detect_format(raw_values) -> str:
     return "number"
 
 
-def format_value(value, fmt, original="") -> str:
+def format_value(value, fmt, original=""):
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return str(original) if original not in (None, "") else "—"
 
@@ -108,7 +102,7 @@ def format_value(value, fmt, original="") -> str:
     return f"{value:,.2f}"
 
 
-def load_raw(source) -> pd.DataFrame:
+def load_raw(source):
     df = pd.read_excel(
         source,
         dtype=str,
@@ -116,8 +110,8 @@ def load_raw(source) -> pd.DataFrame:
         engine="openpyxl"
     ).fillna("")
 
-    if METRIC_COL not in df.columns:
-        df = df.rename(columns={df.columns[0]: METRIC_COL})
+    # Your first column is the metric column: "In MM (CAD)"
+    df = df.rename(columns={df.columns[0]: METRIC_COL})
 
     df = df.set_index(METRIC_COL)
     df.index = df.index.astype(str).str.strip()
@@ -125,25 +119,24 @@ def load_raw(source) -> pd.DataFrame:
     return df
 
 
-def build_numeric(raw: pd.DataFrame):
-    formats = {m: detect_format(raw.loc[m].tolist()) for m in raw.index}
+def build_numeric(raw):
+    formats = {}
+    numeric_rows = []
 
-    numeric = raw.apply(
-        lambda row: [parse_value(v) for v in row],
-        axis=1,
-        result_type="expand"
+    for metric, row in raw.iterrows():
+        formats[metric] = detect_format(row.tolist())
+        numeric_rows.append([parse_value(v) for v in row])
+
+    numeric = pd.DataFrame(
+        numeric_rows,
+        index=raw.index,
+        columns=raw.columns
     )
-
-    numeric.columns = raw.columns
-    numeric.index = raw.index
 
     return numeric.astype("float64"), formats
 
 
-# --------------------------------------------------------------------------- #
-# PDF helpers
-# --------------------------------------------------------------------------- #
-def _metric_png(metric: str, num_v: pd.DataFrame, fmt: str) -> bytes | None:
+def _metric_png(metric, num_v, fmt):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -192,7 +185,7 @@ def _metric_png(metric: str, num_v: pd.DataFrame, fmt: str) -> bytes | None:
     return buf.getvalue()
 
 
-def build_pdf_report(raw_v, num_v, formats, source_label) -> bytes:
+def build_pdf_report(raw_v, num_v, formats, source_label):
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.lib import colors
@@ -236,7 +229,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label) -> bytes:
     )
 
     story = [
-        Paragraph("Bank Metrics Report", styles["Title"]),
+        Paragraph("DTMC Stats Report", styles["Title"]),
         Paragraph(
             f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
             f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
@@ -337,7 +330,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label) -> bytes:
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.HexColor("#999999"))
         canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
-        canvas.drawString(margin, 0.3 * inch, "Bank Metrics Report")
+        canvas.drawString(margin, 0.3 * inch, "DTMC Stats Report")
         canvas.restoreState()
 
     buf = io.BytesIO()
@@ -349,7 +342,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label) -> bytes:
         rightMargin=margin,
         topMargin=margin,
         bottomMargin=0.6 * inch,
-        title="Bank Metrics Report",
+        title="DTMC Stats Report",
     )
 
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
@@ -358,15 +351,14 @@ def build_pdf_report(raw_v, num_v, formats, source_label) -> bytes:
 
 
 @st.cache_data(show_spinner="Building PDF report…")
-def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label) -> bytes:
+def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label):
     df = pd.read_csv(
         io.StringIO(raw_csv),
         dtype=str,
         keep_default_na=False
     ).fillna("")
 
-    if METRIC_COL not in df.columns:
-        df = df.rename(columns={df.columns[0]: METRIC_COL})
+    df = df.rename(columns={df.columns[0]: METRIC_COL})
 
     raw_v = df.set_index(METRIC_COL)
     raw_v.index = raw_v.index.astype(str).str.strip()
@@ -387,9 +379,6 @@ def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label) -> by
     return build_pdf_report(raw_v, num_v, formats, source_label)
 
 
-# --------------------------------------------------------------------------- #
-# Streamlit UI
-# --------------------------------------------------------------------------- #
 st.set_page_config(
     page_title="DTMC Stats Dashboard",
     page_icon="🏦",
@@ -399,8 +388,8 @@ st.set_page_config(
 st.title("🏦 DTMC Stats Dashboard")
 
 st.caption(
-    "This dashboard reads data from DTMC stats.xlsx in the GitHub repository. "
-    "The first column should contain metric names, and the remaining columns should contain banks/entities."
+    "This dashboard reads data from DTMC stats.xlsx. "
+    "The first column contains metrics, and the remaining columns contain banks."
 )
 
 with st.sidebar:
@@ -416,7 +405,7 @@ with st.sidebar:
 
     if source_choice == "Upload Excel file":
         upload = st.file_uploader(
-            "Excel file: first column = metric name, other columns = banks/entities",
+            "Excel file: first column = metrics, other columns = banks",
             type=["xlsx"],
         )
 
@@ -444,7 +433,7 @@ except Exception as exc:
 
 
 if raw.empty or raw.shape[1] == 0:
-    st.warning("The Excel file has no bank/entity columns yet.")
+    st.warning("The Excel file has no bank columns.")
     st.stop()
 
 
@@ -458,7 +447,7 @@ with st.sidebar:
     st.header("Filters")
 
     sel_banks = st.multiselect(
-        "Banks / Entities",
+        "Banks",
         all_banks,
         default=all_banks,
     )
@@ -474,14 +463,14 @@ with st.sidebar:
     sort_charts = st.checkbox("Sort bars by value", value=True)
 
     highlight = st.selectbox(
-        "Highlight a bank/entity",
+        "Highlight a bank",
         ["(none)"] + sel_banks,
         index=0,
     )
 
 
 if not sel_banks or not sel_metrics:
-    st.info("Pick at least one bank/entity and one metric in the sidebar.")
+    st.info("Pick at least one bank and one metric.")
     st.stop()
 
 
@@ -515,8 +504,7 @@ with st.sidebar:
 
     except ModuleNotFoundError as exc:
         st.warning(
-            f"PDF export needs an extra package: `{exc.name}`. "
-            "Install with `pip install reportlab matplotlib`."
+            f"PDF export needs `{exc.name}`. Install with `pip install reportlab matplotlib`."
         )
 
     except Exception as exc:
@@ -593,7 +581,7 @@ with tab_heat:
     st.plotly_chart(heat, use_container_width=True)
 
 
-def _metric_bar_fig(metric: str, fmt: str):
+def _metric_bar_fig(metric, fmt):
     series = num_v.loc[metric].dropna()
 
     if series.empty:
@@ -664,7 +652,7 @@ with tab_charts:
     ]
 
     if not topic_pages:
-        st.info("No chartable metrics in the current selection.")
+        st.info("No chartable metrics.")
     else:
         page_tabs = st.tabs([
             f"{'📈' if t == TOPIC_PERFORMANCE else '🛡️'} {t} ({len(ms)})"
@@ -697,11 +685,11 @@ with st.expander("➕ How to update the dashboard"):
 The dashboard is driven by **DTMC stats.xlsx**.
 
 - Put **DTMC stats.xlsx** in the same GitHub repository folder as `app.py`.
-- The **first column** should contain metric names.
-- The remaining columns should contain banks or entities.
-- Add a new column to add a new bank/entity.
-- Add a new row to add a new metric.
+- The first column should contain metrics, like `Revenue`, `YoY (%)`, `CET 1 ratio`, etc.
+- The remaining columns should contain banks.
+- Add a new column to add a bank.
+- Add a new row to add a metric.
 - Use `$` for currency and `%` for percentage values.
-- Use `NA`, `N/A`, `-`, or text like `Meets Req` for unavailable or qualitative values.
+- Use `NA`, `N/A`, `-`, or text like `Meets Req` for unavailable values.
         """
     )
