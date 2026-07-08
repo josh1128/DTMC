@@ -1,3 +1,26 @@
+"""
+Bank Metrics Dashboard (Streamlit)
+==================================
+
+A fully data-driven dashboard. It reads a CSV where the FIRST column is the
+metric name and every OTHER column is an entity (bank). It then:
+
+  * parses values generically ($, %, commas, negatives, "NA", "Meets Req", ...)
+  * auto-detects each metric's format (currency / percent / number)
+  * renders a formatted table, a normalized heatmap, and one chart per metric
+
+Charts are grouped into TWO topic pages -- "Financial Performance" and
+"Capital, Liquidity & Credit Quality" -- shown side by side in a landscape
+2-column grid so each page fits on screen without scrolling. The PDF report
+uses the same grouping: one landscape page of charts per topic.
+
+Because nothing about the banks or the metrics is hardcoded, ADDING A NEW ROW
+(metric) or a NEW COLUMN (bank) to the CSV and reloading the app makes it show
+up everywhere automatically (new metrics are auto-assigned to a topic page).
+
+Run with:  streamlit run app.py
+"""
+
 from __future__ import annotations
 
 import os
@@ -6,159 +29,74 @@ import math
 from datetime import datetime
 
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, landscape
-from reportlab.lib.units import inch
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Table,
-    TableStyle,
-    Paragraph,
-    Spacer,
-    Image,
-    PageBreak,
-)
-from reportlab.lib.styles import getSampleStyleSheet
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bank_metrics.csv")
+METRIC_COL = "Metric"  # name of the first column in the CSV
 
+# Seed data (transcribed from the source table, in MM CAD). Used only to create
+# the CSV the first time the app runs, if no CSV exists yet. After that, the CSV
+# is the single source of truth -- edit it freely.
+BANKS = ["TD", "RBC", "BNS", "BMO", "CIBC", "NBC", "LBC", "Desjardins",
+         "ATB", "BNP Paribas", "Merrill Lynch", "Citibank NA"]
 
-EXCEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "DTMC stats.xlsx"
-)
+SEED_ROWS = [
+    ("Revenue",
+     ["$59,180", "$65,717", "$34,216", "$34,683", "$28,897", "$14,023",
+      "$884", "$15,620", "$2,433", "$49,081", "$107,422", "$78,734"]),
+    ("Revenue YoY (%)",
+     ["-6.4%", "5.5%", "8.14%", "6.20%", "7.86%", "10.12%",
+      "-4.16%", "11.07%", "17.82%", "2.39%", "2.02%", "4.00%"]),
+    ("Net Income",
+     ["$14,910", "$22,138", "$9,548", "$9,731", "$9,818", "$4,612",
+      "$27", "$3,321", "$542", "$12,491", "$31,733", "$16,027"]),
+    ("Net Income YoY (%)",
+     ["-27.4%", "8.7%", "22.58%", "11.73%", "16.48%", "14.81%",
+      "-80.06%", "14.71%", "56.19%", "2.18%", "4.01%", "12.03%"]),
+    ("CET1 Ratio (%)",
+     ["14.5%", "13.7%", "13.3%", "13.0%", "13.4%", "13.7%",
+      "11.0%", "23.2%", "11.9%", "12.8%", "11.2%", "12.7%"]),
+    ("LCR (%)",
+     ["142%", "126%", "124%", "128%", "133%", "189%",
+      "Meets Req", "167%", "129%", "134%", "113%", "114%"]),
+    ("Gross NPAs/Customer Loans + OREO (%)",
+     ["0.56%", "0.86%", "0.99%", "1.07%", "0.64%", "1.23%",
+      "1.18%", "0.80%", "NA", "2.97%", "0.98%", "1.09%"]),
+    ("New Loan Loss Prov/Avg Customer Loans (%)",
+     ["0.47%", "0.43%", "0.61%", "0.45%", "0.41%", "0.45%",
+      "0.17%", "0.20%", "0.22%", "0.40%", "0.48%", "1.39%"]),
+]
 
-METRIC_COL = "In MM (CAD)"
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
 
-PERFORMANCE_KEYWORDS = (
-    "revenue", "income", "earnings", "profit", "margin",
-    "yoy", "growth", "eps", "roe", "roa"
-)
+# --------------------------------------------------------------------------- #
+# Topic grouping (drives the 2 chart pages on screen and in the PDF)
+# --------------------------------------------------------------------------- #
+# A metric goes to "Financial Performance" if it's a currency metric or its
+# name matches one of these keywords; everything else lands in the second
+# topic. New CSV rows are therefore auto-assigned -- no code changes needed.
+PERFORMANCE_KEYWORDS = ("revenue", "income", "earnings", "profit", "margin",
+                        "yoy", "growth", "eps", "roe", "roa", "equity")
 
 TOPIC_PERFORMANCE = "Financial Performance"
 TOPIC_RISK = "Capital, Liquidity & Credit Quality"
 
-ACCENT = "#1f6f8b"
-POS = "#2a9d4a"
-NEG = "#c0392b"
 
+def group_metrics_by_topic(metrics, formats) -> list[tuple[str, list[str]]]:
+    """Split metrics into the two topic pages.
 
-def make_unique_index(index):
-    counts = {}
-    new_index = []
-
-    for item in index:
-        item = str(item).strip()
-
-        if item not in counts:
-            counts[item] = 1
-            new_index.append(item)
-        else:
-            counts[item] += 1
-            new_index.append(f"{item} ({counts[item]})")
-
-    return new_index
-
-
-def clean_metric_name(metric):
-    metric = str(metric)
-
-    if metric.endswith(")") and " (" in metric:
-        base, suffix = metric.rsplit(" (", 1)
-        if suffix[:-1].isdigit():
-            return base
-
-    return metric
-
-
-def parse_value(raw):
-    if raw is None:
-        return None
-
-    try:
-        if pd.isna(raw):
-            return None
-    except Exception:
-        pass
-
-    s = str(raw).strip()
-
-    if s.lower() in MISSING_TOKENS:
-        return None
-
-    negative = False
-
-    if s.startswith("(") and s.endswith(")"):
-        negative = True
-        s = s[1:-1]
-
-    s = s.replace("$", "").replace(",", "").replace("%", "").strip()
-
-    if s.startswith("-"):
-        negative = True
-        s = s[1:]
-
-    try:
-        value = float(s)
-    except ValueError:
-        return None
-
-    return -value if negative else value
-
-
-def detect_format(metric_name, raw_values):
-    name = clean_metric_name(metric_name).lower()
-    cells = [str(v) for v in raw_values if v is not None]
-
-    currency_keywords = ["revenue", "income"]
-    percent_keywords = [
-        "%", "yoy", "ratio", "lcr", "npas", "loans",
-        "equity price", "cet", "roe", "roa"
-    ]
-
-    if any(k in name for k in currency_keywords):
-        return "currency"
-
-    if any(k in name for k in percent_keywords) or any("%" in c for c in cells):
-        return "percent"
-
-    if any("$" in c for c in cells):
-        return "currency"
-
-    return "number"
-
-
-def format_value(value, fmt, original=""):
-    try:
-        if pd.isna(value):
-            return str(original) if original not in (None, "") else "—"
-    except Exception:
-        return str(original)
-
-    try:
-        value = float(value)
-    except Exception:
-        return str(original)
-
-    if fmt == "currency":
-        return f"${value:,.0f}"
-
-    if fmt == "percent":
-        if abs(value) <= 1:
-            value = value * 100
-        return f"{value:.2f}%"
-
-    return f"{value:,.2f}"
-
-
-def group_metrics_by_topic(metrics, formats):
+    Returns [(topic_name, [metrics...]), ...] preserving metric order. If the
+    keyword rules put everything into one bucket, fall back to an even split
+    so both pages are still useful.
+    """
     perf, risk = [], []
-
     for m in metrics:
-        name = clean_metric_name(m).lower()
-
+        name = m.lower()
         if formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
             perf.append(m)
         else:
@@ -171,425 +109,571 @@ def group_metrics_by_topic(metrics, formats):
     return [(TOPIC_PERFORMANCE, perf), (TOPIC_RISK, risk)]
 
 
-def load_raw(source):
-    df = pd.read_excel(
-        source,
-        dtype=str,
-        keep_default_na=False,
-        engine="openpyxl"
-    ).fillna("")
+# --------------------------------------------------------------------------- #
+# Parsing / formatting helpers (pure functions -- easy to test)
+# --------------------------------------------------------------------------- #
+def parse_value(raw) -> float | None:
+    """Turn a raw cell like '$59,180', '-6.4%' or 'Meets Req' into a float.
 
-    df = df.rename(columns={df.columns[0]: METRIC_COL})
-    df = df.set_index(METRIC_COL)
-    df.index = make_unique_index(df.index)
+    Returns None when the cell is missing or non-numeric (e.g. 'Meets Req').
+    Accounting-style negatives '(123)' are supported.
+    """
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+        return None
+    s = str(raw).strip()
+    if s.lower() in MISSING_TOKENS:
+        return None
 
+    negative = False
+    if s.startswith("(") and s.endswith(")"):
+        negative, s = True, s[1:-1]
+
+    s = s.replace("$", "").replace(",", "").replace("%", "").strip()
+    if s.startswith("-"):
+        negative, s = True, s[1:]
+
+    try:
+        value = float(s)
+    except ValueError:
+        return None  # text such as 'Meets Req'
+    return -value if negative else value
+
+
+def detect_format(raw_values) -> str:
+    """Classify a metric as 'currency', 'percent', or 'number' from its cells.
+
+    Majority vote between '$' and '%' so a single mistyped cell (e.g. a stray
+    "$16.48%" in a percent row) can't flip the whole metric's format.
+    """
+    cells = [str(v) for v in raw_values if v is not None]
+    n_cur = sum("$" in c for c in cells)
+    n_pct = sum("%" in c for c in cells)
+    if n_cur > n_pct:
+        return "currency"
+    if n_pct:
+        return "percent"
+    return "number"
+
+
+def format_value(value: float | None, fmt: str, original: str = "") -> str:
+    """Format a parsed number back into a display string for its metric type."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        # Preserve non-numeric original text (e.g. 'Meets Req', 'NA').
+        return str(original) if original not in (None, "") else "—"
+    if fmt == "currency":
+        return f"${value:,.0f}"
+    if fmt == "percent":
+        return f"{value:g}%"
+    return f"{value:,.2f}"
+
+
+# --------------------------------------------------------------------------- #
+# PDF report (reportlab for layout, matplotlib for static charts)
+# --------------------------------------------------------------------------- #
+ACCENT = "#1f6f8b"   # brand teal (also used by the on-screen charts)
+POS = "#2a9d4a"
+NEG = "#c0392b"
+
+
+def _metric_png(metric: str, num_v: pd.DataFrame, fmt: str) -> bytes | None:
+    """Render one metric's bar chart to PNG bytes with matplotlib (Agg)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+
+    series = num_v.loc[metric].dropna().sort_values(ascending=False)
+    if series.empty:
+        return None
+    labels, values = list(series.index), series.values
+    diverging = (values < 0).any()
+    bar_colors = [POS if v >= 0 else NEG for v in values] if diverging else [ACCENT] * len(values)
+
+    fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
+    bars = ax.bar(labels, values, color=bar_colors)
+    ax.set_title(metric, fontsize=10, fontweight="bold")
+    ax.axhline(0, color="#888888", linewidth=0.6)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.tick_params(axis="x", labelrotation=45, labelsize=7)
+    for lbl in ax.get_xticklabels():
+        lbl.set_ha("right")
+    ax.tick_params(axis="y", labelsize=7)
+
+    if fmt == "currency":
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:,.0f}"))
+        labeller = lambda v: f"${v:,.0f}"
+    elif fmt == "percent":
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}%"))
+        labeller = lambda v: f"{v:g}%"
+    else:
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.2f}"))
+        labeller = lambda v: f"{v:,.2f}"
+    ax.bar_label(bars, labels=[labeller(v) for v in values], fontsize=6, padding=2)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def build_pdf_report(raw_v: pd.DataFrame, num_v: pd.DataFrame,
+                     formats: dict, source_label: str) -> bytes:
+    """Assemble a LANDSCAPE PDF: title + comparison table on page 1, then the
+    charts grouped by topic -- one landscape page per topic (2 pages of charts)."""
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Table, TableStyle, Image, PageBreak)
+
+    metrics = list(raw_v.index)
+    banks = list(raw_v.columns)
+    page_w, page_h = landscape(letter)
+    margin = 0.5 * inch
+    avail_w = page_w - 2 * margin
+
+    styles = getSampleStyleSheet()
+    h_cell = ParagraphStyle("hcell", parent=styles["Normal"], fontSize=6.5,
+                            leading=8, textColor=colors.white, fontName="Helvetica-Bold")
+    row_lbl = ParagraphStyle("rowlbl", parent=styles["Normal"], fontSize=7,
+                             leading=8, fontName="Helvetica-Bold")
+    subtitle = ParagraphStyle("sub", parent=styles["Normal"], fontSize=8,
+                              textColor=colors.HexColor("#666666"))
+
+    story = [
+        Paragraph("Bank Metrics Report", styles["Title"]),
+        Paragraph(
+            f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
+            f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
+            f"&nbsp;|&nbsp; source: {source_label}",
+            subtitle,
+        ),
+        Spacer(1, 10),
+    ]
+
+    # --- Comparison table (banks as rows so it grows down the page, not off it).
+    header = [Paragraph("Bank", h_cell)] + [Paragraph(m, h_cell) for m in metrics]
+    table_data = [header]
+    red_cells = []  # (col, row) coords of negative values
+    for r, bank in enumerate(banks, start=1):
+        cells = [Paragraph(bank, row_lbl)]
+        for c, metric in enumerate(metrics, start=1):
+            val = num_v.loc[metric, bank]
+            cells.append(format_value(val, formats[metric], raw_v.loc[metric, bank]))
+            if pd.notna(val) and val < 0:
+                red_cells.append((c, r))
+        table_data.append(cells)
+
+    first_w = 1.0 * inch
+    other_w = (avail_w - first_w) / max(len(metrics), 1)
+    table = Table(table_data, colWidths=[first_w] + [other_w] * len(metrics),
+                  repeatRows=1)
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(ACCENT)),
+        ("FONTSIZE", (0, 1), (-1, -1), 7),
+        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f7f9")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for c, r in red_cells:
+        style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(NEG)))
+    table.setStyle(TableStyle(style))
+    story.append(table)
+
+    # --- Charts grouped by topic: each topic starts on its own landscape page.
+    img_w = (avail_w - 0.2 * inch) / 2
+    img_h = img_w * 0.6
+
+    for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
+        if not topic_metrics:
+            continue
+        story += [PageBreak(),
+                  Paragraph(topic, styles["Heading2"]),
+                  Spacer(1, 4)]
+
+        pair = []
+        chart_rows = []
+        for metric in topic_metrics:
+            png = _metric_png(metric, num_v, formats[metric])
+            if png is None:
+                continue
+            pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
+            if len(pair) == 2:
+                chart_rows.append(pair)
+                pair = []
+        if pair:
+            pair.append("")
+            chart_rows.append(pair)
+        if chart_rows:
+            grid = Table(chart_rows, colWidths=[img_w + 0.1 * inch] * 2)
+            grid.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]))
+            story.append(grid)
+
+    def _footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#999999"))
+        canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
+        canvas.drawString(margin, 0.3 * inch, "Bank Metrics Report — in MM (CAD)")
+        canvas.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(letter),
+                            leftMargin=margin, rightMargin=margin,
+                            topMargin=margin, bottomMargin=0.6 * inch,
+                            title="Bank Metrics Report")
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buf.getvalue()
+
+
+@st.cache_data(show_spinner="Building PDF report…")
+def get_report_bytes(raw_csv: str, formats_items: tuple,
+                     metrics: tuple, banks: tuple, source_label: str) -> bytes:
+    """Cached wrapper so the PDF only rebuilds when data/selection changes."""
+    raw_v = pd.read_csv(io.StringIO(raw_csv), dtype=str,
+                        keep_default_na=False).fillna("").set_index(METRIC_COL)
+    raw_v = raw_v.loc[list(metrics), list(banks)]
+    formats = dict(formats_items)
+    num_v = raw_v.apply(lambda row: [parse_value(v) for v in row], axis=1,
+                        result_type="expand").astype("float64")
+    num_v.columns, num_v.index = raw_v.columns, raw_v.index
+    return build_pdf_report(raw_v, num_v, formats, source_label)
+
+
+# --------------------------------------------------------------------------- #
+# Data loading
+# --------------------------------------------------------------------------- #
+def ensure_seed_csv() -> None:
+    """Create the CSV from SEED_ROWS the first time, if it doesn't exist."""
+    if os.path.exists(CSV_PATH):
+        return
+    data = {METRIC_COL: [name for name, _ in SEED_ROWS]}
+    for i, bank in enumerate(BANKS):
+        data[bank] = [vals[i] for _, vals in SEED_ROWS]
+    pd.DataFrame(data).to_csv(CSV_PATH, index=False)
+
+
+def _dedupe_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Make duplicate metric names unique ('YoY (▲%)' → 'YoY (▲%) (2)') so
+    .loc lookups by metric name never collide. Rename rows in the source file
+    for nicer labels."""
+    seen: dict[str, int] = {}
+    new_index = []
+    for name in df.index:
+        seen[name] = seen.get(name, 0) + 1
+        new_index.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
+    df.index = new_index
     return df
 
 
-def build_numeric(raw):
-    formats = {}
-    numeric_rows = []
+def load_raw(source) -> pd.DataFrame:
+    """Load the CSV into a frame indexed by metric name (cells kept as strings).
 
-    for metric, row in raw.iterrows():
-        formats[metric] = detect_format(metric, row.tolist())
-        numeric_rows.append([parse_value(v) for v in row])
+    keep_default_na=False so literal text like 'NA' is preserved verbatim rather
+    than being silently converted to a missing value by pandas.
+    """
+    df = pd.read_csv(source, dtype=str, keep_default_na=False).fillna("")
+    if df.columns[0] != METRIC_COL:
+        df = df.rename(columns={df.columns[0]: METRIC_COL})
+    df = df.set_index(METRIC_COL)
+    df.index = df.index.str.strip()
+    df.columns = df.columns.str.strip()
+    return _dedupe_index(df)
 
-    numeric = pd.DataFrame(
-        numeric_rows,
-        index=raw.index,
-        columns=raw.columns
-    )
 
+def load_raw_xlsx(source) -> pd.DataFrame:
+    """Load an Excel sheet into the same string frame as load_raw.
+
+    Values are converted according to each cell's Excel DISPLAY format, so a
+    cell stored as 0.055 with a percent format arrives as '5.5%', and one
+    stored as 59180 with a '$' format arrives as '$59,180'. Text cells
+    ('Meets Req', 'NA') pass through verbatim. Blank rows are skipped.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(source, data_only=True)
+    ws = wb.active
+
+    def cell_to_str(cell) -> str:
+        v = cell.value
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v.strip()
+        fmt = cell.number_format or ""
+        if "%" in fmt:
+            return f"{round(v * 100, 4):g}%"
+        if "$" in fmt:
+            return f"${v:,.0f}"
+        if isinstance(v, float) and v == int(v):
+            return str(int(v))
+        return str(v)
+
+    rows = []
+    for row in ws.iter_rows():
+        rows.append([cell_to_str(c) for c in row])
+    if not rows:
+        return pd.DataFrame(columns=[METRIC_COL]).set_index(METRIC_COL)
+
+    header = [h if h else f"Column {i}" for i, h in enumerate(rows[0])]
+    header[0] = METRIC_COL
+    body = [r for r in rows[1:] if r and str(r[0]).strip()]  # drop blank rows
+    df = pd.DataFrame(body, columns=header).set_index(METRIC_COL)
+    df.index = df.index.str.strip()
+    df.columns = df.columns.str.strip()
+    df = df.loc[:, [c for c in df.columns if c and not c.startswith("Column ")]]
+    return _dedupe_index(df)
+
+
+def build_numeric(raw: pd.DataFrame):
+    """Return (numeric_frame, formats_dict) derived from the raw string frame."""
+    formats = {m: detect_format(raw.loc[m].tolist()) for m in raw.index}
+    numeric = raw.apply(lambda row: [parse_value(v) for v in row], axis=1, result_type="expand")
+    numeric.columns = raw.columns
+    numeric.index = raw.index
     return numeric.astype("float64"), formats
 
 
-def create_pdf_report(display_df, source_label, chart_figs):
-    buffer = io.BytesIO()
+# --------------------------------------------------------------------------- #
+# UI
+# --------------------------------------------------------------------------- #
+st.set_page_config(page_title="Bank Metrics Dashboard", page_icon="🏦", layout="wide")
 
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=landscape(letter),
-        rightMargin=24,
-        leftMargin=24,
-        topMargin=24,
-        bottomMargin=24,
-    )
+st.title("🏦 Bank Metrics Dashboard")
+st.caption("In MM (CAD) unless the metric name says otherwise. "
+           "This view is generated from the data file — add a row (metric) or a "
+           "column (bank) and it appears everywhere automatically.")
 
-    styles = getSampleStyleSheet()
-    elements = []
+ensure_seed_csv()
 
-    elements.append(Paragraph("DTMC Stats Dashboard Report", styles["Title"]))
-    elements.append(Paragraph(
-        f"Source: {source_label}<br/>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        styles["Normal"],
-    ))
-    elements.append(Spacer(1, 12))
-
-    table_data = [["Metric"] + list(display_df.columns)]
-
-    for idx, row in display_df.iterrows():
-        table_data.append([str(idx)] + row.astype(str).tolist())
-
-    table = Table(table_data, repeatRows=1)
-
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
-        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-
-    elements.append(table)
-
-    chart_export_failed = False
-
-    if chart_figs:
-        elements.append(PageBreak())
-        elements.append(Paragraph("Charts", styles["Title"]))
-        elements.append(Spacer(1, 12))
-
-        for fig in chart_figs:
-            try:
-                img_bytes = fig.to_image(
-                    format="png",
-                    width=900,
-                    height=450,
-                    scale=2,
-                )
-
-                img_buffer = io.BytesIO(img_bytes)
-
-                elements.append(
-                    Image(
-                        img_buffer,
-                        width=9.5 * inch,
-                        height=4.75 * inch,
-                    )
-                )
-                elements.append(Spacer(1, 16))
-
-            except Exception:
-                chart_export_failed = True
-                continue
-
-    if chart_export_failed:
-        elements.append(Spacer(1, 12))
-        elements.append(Paragraph(
-            "Note: Some charts could not be exported because Chrome/Kaleido is not available in the deployment environment.",
-            styles["Normal"],
-        ))
-
-    doc.build(elements)
-    buffer.seek(0)
-
-    return buffer, chart_export_failed
-
-
-st.set_page_config(
-    page_title="DTMC Stats Dashboard",
-    page_icon="🏦",
-    layout="wide",
-)
-
-st.title("🏦 DTMC Stats Dashboard")
-
-st.caption(
-    "This dashboard reads data from DTMC stats.xlsx. "
-    "The first column contains metrics, and the remaining columns contain banks."
-)
-
+# ---- Sidebar: data source -------------------------------------------------- #
 with st.sidebar:
     st.header("Data")
-
-    source_choice = st.radio(
-        "Source",
-        ["Bundled Excel file", "Upload Excel file"],
-        index=0,
-    )
+    source_choice = st.radio("Source", ["Bundled file", "Upload a file"], index=0)
 
     upload = None
-
-    if source_choice == "Upload Excel file":
+    if source_choice == "Upload a file":
         upload = st.file_uploader(
-            "Excel file: first column = metrics, other columns = banks",
-            type=["xlsx"],
+            "First column = metric name, other columns = banks "
+            "(CSV or Excel — first sheet is used)",
+            type=["csv", "xlsx"],
         )
 
     if st.button("🔄 Reload data", use_container_width=True):
         st.rerun()
 
-
+# ---- Load ------------------------------------------------------------------ #
 try:
     if upload is not None:
-        raw = load_raw(upload)
+        if upload.name.lower().endswith(".xlsx"):
+            raw = load_raw_xlsx(io.BytesIO(upload.getvalue()))
+        else:
+            raw = load_raw(io.StringIO(upload.getvalue().decode("utf-8")))
         source_label = upload.name
     else:
-        raw = load_raw(EXCEL_PATH)
-        source_label = os.path.basename(EXCEL_PATH)
-
-except FileNotFoundError:
-    st.error(
-        "Could not find `DTMC stats.xlsx`. Make sure it is in the same GitHub repository folder as `DTMC.py`."
-    )
+        raw = load_raw(CSV_PATH)
+        source_label = os.path.basename(CSV_PATH)
+except Exception as exc:  # noqa: BLE001
+    st.error(f"Could not read the data: {exc}")
     st.stop()
-
-except Exception as exc:
-    st.error(f"Could not read the Excel file: {exc}")
-    st.stop()
-
 
 if raw.empty or raw.shape[1] == 0:
-    st.warning("The Excel file has no bank columns.")
+    st.warning("The file has no entity (bank) columns yet.")
     st.stop()
-
 
 numeric, formats = build_numeric(raw)
 
 all_banks = list(raw.columns)
 all_metrics = list(raw.index)
 
+# ---- Sidebar: filters ------------------------------------------------------ #
 with st.sidebar:
     st.header("Filters")
-
-    sel_banks = st.multiselect(
-        "Banks",
-        all_banks,
-        default=all_banks,
-    )
-
-    sel_metrics = st.multiselect(
-        "Metrics",
-        all_metrics,
-        default=all_metrics,
-    )
-
+    sel_banks = st.multiselect("Banks (columns)", all_banks, default=all_banks)
+    sel_metrics = st.multiselect("Metrics (rows)", all_metrics, default=all_metrics)
     st.divider()
-
     sort_charts = st.checkbox("Sort bars by value", value=True)
-
-    highlight = st.selectbox(
-        "Highlight a bank",
-        ["(none)"] + sel_banks,
-        index=0,
-    )
-
+    highlight = st.selectbox("Highlight a bank", ["(none)"] + sel_banks, index=0)
 
 if not sel_banks or not sel_metrics:
-    st.info("Pick at least one bank and one metric.")
+    st.info("Pick at least one bank and one metric in the sidebar.")
     st.stop()
-
 
 raw_v = raw.loc[sel_metrics, sel_banks]
 num_v = numeric.loc[sel_metrics, sel_banks]
 
-
-def _metric_bar_fig(metric, fmt):
-    row_position = list(num_v.index).index(metric)
-    series = num_v.iloc[row_position].dropna()
-
-    if series.empty:
-        return None
-
-    if fmt == "percent" and abs(series).max() <= 1:
-        series = series * 100
-
-    frame = series.reset_index()
-    frame.columns = ["Bank", "Value"]
-
-    if sort_charts:
-        frame = frame.sort_values("Value", ascending=False)
-
-    diverging = (frame["Value"] < 0).any()
-
-    if diverging:
-        colors_list = [POS if v >= 0 else NEG for v in frame["Value"]]
-    else:
-        colors_list = [ACCENT] * len(frame)
-
-    if highlight != "(none)":
-        colors_list = [
-            "#e08a1e" if b == highlight else c
-            for b, c in zip(frame["Bank"], colors_list)
-        ]
-
-    if fmt == "currency":
-        texttmpl = "$%{y:,.0f}"
-        hovertmpl = "%{x}<br>$%{y:,.0f}<extra></extra>"
-        axfmt = "$,.0f"
-    elif fmt == "percent":
-        texttmpl = "%{y:.2f}%"
-        hovertmpl = "%{x}<br>%{y:.2f}%<extra></extra>"
-        axfmt = ".1f"
-    else:
-        texttmpl = "%{y:,.2f}"
-        hovertmpl = "%{x}<br>%{y:,.2f}<extra></extra>"
-        axfmt = ",.2f"
-
-    fig = go.Figure(
-        go.Bar(
-            x=frame["Bank"],
-            y=frame["Value"],
-            marker_color=colors_list,
-            text=frame["Value"],
-            texttemplate=texttmpl,
-            textposition="outside",
-            hovertemplate=hovertmpl,
-            cliponaxis=False,
+# ---- Sidebar: PDF report --------------------------------------------------- #
+with st.sidebar:
+    st.divider()
+    st.header("Report")
+    st.caption("Exports the table and charts (grouped by topic, one landscape "
+               "page each) for the currently selected banks and metrics.")
+    try:
+        report_bytes = get_report_bytes(
+            raw_v.reset_index().to_csv(index=False),
+            tuple((m, formats[m]) for m in sel_metrics),
+            tuple(sel_metrics),
+            tuple(sel_banks),
+            source_label,
         )
-    )
-
-    fig.update_layout(
-        title=dict(text=clean_metric_name(metric), font=dict(size=14)),
-        height=300,
-        margin=dict(l=10, r=10, t=42, b=10),
-        yaxis=dict(tickformat=axfmt, title=""),
-        xaxis=dict(title=""),
-        showlegend=False,
-    )
-
-    return fig
-
-
-display = pd.DataFrame(
-    index=[clean_metric_name(m) for m in raw_v.index],
-    columns=raw_v.columns,
-    dtype=object,
-)
-
-for i, m in enumerate(raw_v.index):
-    for j, b in enumerate(raw_v.columns):
-        display.iloc[i, j] = format_value(
-            num_v.iloc[i, j],
-            formats[m],
-            raw_v.iloc[i, j],
+        st.download_button(
+            "📄 Download report (PDF)",
+            data=report_bytes,
+            file_name=f"bank_metrics_report_{datetime.now():%Y%m%d}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
         )
+    except ModuleNotFoundError as exc:
+        st.warning(f"PDF export needs an extra package: `{exc.name}`. "
+                   "Install with `pip install reportlab matplotlib`.")
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not build the PDF: {exc}")
 
+# --------------------------------------------------------------------------- #
+# Tabs
+# --------------------------------------------------------------------------- #
+tab_charts, tab_table, tab_heat = st.tabs(["📊 Charts", "📋 Table", "🌡 Heatmap"])
 
-chart_figs_for_pdf = []
-
-for metric in sel_metrics:
-    fig = _metric_bar_fig(metric, formats[metric])
-    if fig is not None:
-        chart_figs_for_pdf.append(fig)
-
-
-pdf_file, chart_export_failed = create_pdf_report(
-    display,
-    source_label,
-    chart_figs_for_pdf,
-)
-
-st.download_button(
-    label="📄 Download PDF Report with Table and Charts",
-    data=pdf_file,
-    file_name="DTMC_Stats_Report_with_Charts.pdf",
-    mime="application/pdf",
-    use_container_width=True,
-)
-
-if chart_export_failed:
-    st.warning(
-        "PDF was created, but charts could not be exported. "
-        "Add `chromium` to packages.txt on Streamlit Cloud."
-    )
-
-
-tab_charts, tab_table, tab_heat = st.tabs([
-    "📊 Charts",
-    "📋 Table",
-    "🌡 Heatmap",
-])
-
-
+# ----- Table ---------------------------------------------------------------- #
 with tab_table:
-    st.dataframe(display, use_container_width=True)
+    display = pd.DataFrame(index=raw_v.index, columns=raw_v.columns, dtype=object)
+    for m in raw_v.index:
+        for b in raw_v.columns:
+            display.loc[m, b] = format_value(num_v.loc[m, b], formats[m], raw_v.loc[m, b])
 
+    neg_mask = num_v.lt(0)
 
+    def _style(_):
+        css = pd.DataFrame("", index=display.index, columns=display.columns)
+        css[neg_mask] = f"color: {NEG}; font-weight: 600;"
+        return css
+
+    st.dataframe(display.style.apply(_style, axis=None), use_container_width=True)
+    st.caption("Negative values are shown in red. Non-numeric entries "
+               "(e.g. “Meets Req”) are kept as-is.")
+
+# ----- Heatmap -------------------------------------------------------------- #
 with tab_heat:
+    st.caption("Each metric (row) is min-max normalized across the selected banks "
+               "so different scales are comparable. Darker = higher within that row.")
+    # Normalize per row 0..1; rows with no spread -> 0.5
     norm = num_v.copy()
-
-    for i, _ in enumerate(norm.index):
-        row = norm.iloc[i]
-        lo = row.min()
-        hi = row.max()
-
-        if pd.isna(lo) or pd.isna(hi) or hi == lo:
-            norm.iloc[i] = 0.5
-        else:
-            norm.iloc[i] = (row - lo) / (hi - lo)
+    for m in norm.index:
+        row = norm.loc[m]
+        lo, hi = row.min(), row.max()
+        norm.loc[m] = 0.5 if (pd.isna(lo) or pd.isna(hi) or hi == lo) else (row - lo) / (hi - lo)
 
     heat = go.Figure(
         go.Heatmap(
             z=norm.values,
             x=list(norm.columns),
-            y=[clean_metric_name(m) for m in norm.index],
+            y=list(norm.index),
             colorscale="Teal",
-            zmin=0,
-            zmax=1,
+            zmin=0, zmax=1,
             hovertemplate="%{y}<br>%{x}<br>rank score: %{z:.2f}<extra></extra>",
             colorbar=dict(title="rel."),
         )
     )
-
-    heat.update_layout(
-        height=60 + 42 * len(norm.index),
-        margin=dict(l=10, r=10, t=10, b=10),
-        yaxis=dict(autorange="reversed"),
-    )
-
+    heat.update_layout(height=60 + 42 * len(norm.index),
+                       margin=dict(l=10, r=10, t=10, b=10),
+                       yaxis=dict(autorange="reversed"))
     st.plotly_chart(heat, use_container_width=True)
 
 
+# ----- Charts (2 topic pages, landscape 2-column grid) ---------------------- #
+def _metric_bar_fig(metric: str, fmt: str) -> go.Figure | None:
+    """Build the on-screen Plotly bar chart for one metric (compact height so a
+    full topic page fits on screen without scrolling)."""
+    series = num_v.loc[metric].dropna()
+    if series.empty:
+        return None
+
+    frame = series.reset_index()
+    frame.columns = ["Bank", "Value"]
+    if sort_charts:
+        frame = frame.sort_values("Value", ascending=False)
+
+    diverging = (frame["Value"] < 0).any()  # YoY-style metrics
+    if diverging:
+        colors = [POS if v >= 0 else NEG for v in frame["Value"]]
+    else:
+        colors = [ACCENT] * len(frame)
+    if highlight != "(none)":
+        colors = ["#e08a1e" if b == highlight else c
+                  for b, c in zip(frame["Bank"], colors)]
+
+    if fmt == "currency":
+        texttmpl, hovertmpl, axfmt = "$%{y:,.0f}", "%{x}<br>$%{y:,.0f}<extra></extra>", "$,.0f"
+    elif fmt == "percent":
+        texttmpl, hovertmpl, axfmt = "%{y:.2f}%", "%{x}<br>%{y:.2f}%<extra></extra>", ".1f"
+    else:
+        texttmpl, hovertmpl, axfmt = "%{y:,.2f}", "%{x}<br>%{y:,.2f}<extra></extra>", ",.2f"
+
+    fig = go.Figure(go.Bar(
+        x=frame["Bank"], y=frame["Value"],
+        marker_color=colors, text=frame["Value"],
+        texttemplate=texttmpl, textposition="outside",
+        hovertemplate=hovertmpl, cliponaxis=False,
+    ))
+    fig.update_layout(
+        title=dict(text=metric, font=dict(size=14)),
+        height=300, margin=dict(l=10, r=10, t=42, b=10),
+        yaxis=dict(tickformat=axfmt, title=""), xaxis=dict(title=""),
+        showlegend=False,
+    )
+    return fig
+
+
 with tab_charts:
-    topic_pages = [
-        (t, ms)
-        for t, ms in group_metrics_by_topic(sel_metrics, formats)
-        if ms
-    ]
+    topic_pages = [(t, ms) for t, ms in group_metrics_by_topic(sel_metrics, formats) if ms]
 
     if not topic_pages:
-        st.info("No chartable metrics.")
+        st.info("No chartable metrics in the current selection.")
     else:
-        page_tabs = st.tabs([
-            f"{'📈' if t == TOPIC_PERFORMANCE else '🛡️'} {t} ({len(ms)})"
-            for t, ms in topic_pages
-        ])
-
+        page_tabs = st.tabs([f"{'📈' if t == TOPIC_PERFORMANCE else '🛡️'} {t} "
+                             f"({len(ms)})" for t, ms in topic_pages])
         for page_tab, (topic, page_metrics) in zip(page_tabs, topic_pages):
             with page_tab:
                 cols = st.columns(2)
                 shown = 0
-
                 for metric in page_metrics:
                     fig = _metric_bar_fig(metric, formats[metric])
-
                     if fig is None:
                         continue
-
                     cols[shown % 2].plotly_chart(fig, use_container_width=True)
                     shown += 1
-
                 if shown == 0:
                     st.info("No numeric values to chart for this topic.")
 
-
+# --------------------------------------------------------------------------- #
 st.divider()
-
-with st.expander("➕ How to update the dashboard"):
+with st.expander("➕ How to add a bank or a metric"):
     st.markdown(
-        """
-The dashboard is driven by **DTMC stats.xlsx**.
+        f"""
+The dashboard is driven entirely by **`bank_metrics.csv`** (or whatever CSV you
+upload), so it stays in sync automatically:
 
-- Put **DTMC stats.xlsx** in the same GitHub repository folder as `DTMC.py`.
-- The first column should contain metrics.
-- The remaining columns should contain banks.
-- Add a new column to add a bank.
-- Add a new row to add a metric.
-- Use `$` for currency and `%` for percentage values.
-- Use `NA`, `N/A`, `-`, or text like `Meets Req` for unavailable values.
+* **Add a bank** → add a new **column** (header = bank name), fill in its cells,
+  save, then click **🔄 Reload data**. It appears in the table, heatmap and a bar
+  in every chart.
+* **Add a metric** → add a new **row** under the `{METRIC_COL}` column. Use `$`
+  for currency and `%` for percentage values — the app detects the format and a
+  new chart is generated for it. Charts are grouped into two topic pages:
+  currency metrics and names containing words like *revenue*, *income*, or
+  *YoY* land in **{TOPIC_PERFORMANCE}**; everything else goes to
+  **{TOPIC_RISK}**.
+* **Missing / qualitative values** → use `NA`, `N/A`, `-`, or free text like
+  `Meets Req`; these are skipped in charts and shown verbatim in the table.
+
+No code changes needed for new rows or columns.
         """
     )
