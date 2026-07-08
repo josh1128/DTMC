@@ -11,7 +11,16 @@ import streamlit as st
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Table,
+    TableStyle,
+    Paragraph,
+    Spacer,
+    Image,
+    PageBreak,
+)
 from reportlab.lib.styles import getSampleStyleSheet
 
 
@@ -195,7 +204,7 @@ def build_numeric(raw):
     return numeric.astype("float64"), formats
 
 
-def create_pdf_report(display_df, source_label):
+def create_pdf_report(display_df, source_label, chart_figs):
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -210,14 +219,11 @@ def create_pdf_report(display_df, source_label):
     styles = getSampleStyleSheet()
     elements = []
 
-    title = Paragraph("DTMC Stats Dashboard Report", styles["Title"])
-    subtitle = Paragraph(
+    elements.append(Paragraph("DTMC Stats Dashboard Report", styles["Title"]))
+    elements.append(Paragraph(
         f"Source: {source_label}<br/>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         styles["Normal"],
-    )
-
-    elements.append(title)
-    elements.append(subtitle)
+    ))
     elements.append(Spacer(1, 12))
 
     table_data = [["Metric"] + list(display_df.columns)]
@@ -239,6 +245,31 @@ def create_pdf_report(display_df, source_label):
     ]))
 
     elements.append(table)
+
+    if chart_figs:
+        elements.append(PageBreak())
+        elements.append(Paragraph("Charts", styles["Title"]))
+        elements.append(Spacer(1, 12))
+
+        for fig in chart_figs:
+            img_bytes = fig.to_image(
+                format="png",
+                width=900,
+                height=450,
+                scale=2,
+            )
+
+            img_buffer = io.BytesIO(img_bytes)
+
+            elements.append(
+                Image(
+                    img_buffer,
+                    width=9.5 * inch,
+                    height=4.75 * inch,
+                )
+            )
+            elements.append(Spacer(1, 16))
+
     doc.build(elements)
 
     buffer.seek(0)
@@ -342,6 +373,106 @@ if not sel_banks or not sel_metrics:
 raw_v = raw.loc[sel_metrics, sel_banks]
 num_v = numeric.loc[sel_metrics, sel_banks]
 
+
+def _metric_bar_fig(metric, fmt):
+    row_position = list(num_v.index).index(metric)
+    series = num_v.iloc[row_position].dropna()
+
+    if series.empty:
+        return None
+
+    if fmt == "percent" and abs(series).max() <= 1:
+        series = series * 100
+
+    frame = series.reset_index()
+    frame.columns = ["Bank", "Value"]
+
+    if sort_charts:
+        frame = frame.sort_values("Value", ascending=False)
+
+    diverging = (frame["Value"] < 0).any()
+
+    if diverging:
+        colors_list = [POS if v >= 0 else NEG for v in frame["Value"]]
+    else:
+        colors_list = [ACCENT] * len(frame)
+
+    if highlight != "(none)":
+        colors_list = [
+            "#e08a1e" if b == highlight else c
+            for b, c in zip(frame["Bank"], colors_list)
+        ]
+
+    if fmt == "currency":
+        texttmpl = "$%{y:,.0f}"
+        hovertmpl = "%{x}<br>$%{y:,.0f}<extra></extra>"
+        axfmt = "$,.0f"
+    elif fmt == "percent":
+        texttmpl = "%{y:.2f}%"
+        hovertmpl = "%{x}<br>%{y:.2f}%<extra></extra>"
+        axfmt = ".1f"
+    else:
+        texttmpl = "%{y:,.2f}"
+        hovertmpl = "%{x}<br>%{y:,.2f}<extra></extra>"
+        axfmt = ",.2f"
+
+    fig = go.Figure(
+        go.Bar(
+            x=frame["Bank"],
+            y=frame["Value"],
+            marker_color=colors_list,
+            text=frame["Value"],
+            texttemplate=texttmpl,
+            textposition="outside",
+            hovertemplate=hovertmpl,
+            cliponaxis=False,
+        )
+    )
+
+    fig.update_layout(
+        title=dict(text=clean_metric_name(metric), font=dict(size=14)),
+        height=300,
+        margin=dict(l=10, r=10, t=42, b=10),
+        yaxis=dict(tickformat=axfmt, title=""),
+        xaxis=dict(title=""),
+        showlegend=False,
+    )
+
+    return fig
+
+
+display = pd.DataFrame(
+    index=[clean_metric_name(m) for m in raw_v.index],
+    columns=raw_v.columns,
+    dtype=object,
+)
+
+for i, m in enumerate(raw_v.index):
+    for j, b in enumerate(raw_v.columns):
+        display.iloc[i, j] = format_value(
+            num_v.iloc[i, j],
+            formats[m],
+            raw_v.iloc[i, j],
+        )
+
+
+chart_figs_for_pdf = []
+
+for metric in sel_metrics:
+    fig = _metric_bar_fig(metric, formats[metric])
+    if fig is not None:
+        chart_figs_for_pdf.append(fig)
+
+
+st.download_button(
+    label="📄 Download PDF Report with Table and Charts",
+    data=create_pdf_report(display, source_label, chart_figs_for_pdf),
+    file_name="DTMC_Stats_Report_with_Charts.pdf",
+    mime="application/pdf",
+    use_container_width=True,
+)
+
+
 tab_charts, tab_table, tab_heat = st.tabs([
     "📊 Charts",
     "📋 Table",
@@ -350,32 +481,8 @@ tab_charts, tab_table, tab_heat = st.tabs([
 
 
 with tab_table:
-    display = pd.DataFrame(
-        index=[clean_metric_name(m) for m in raw_v.index],
-        columns=raw_v.columns,
-        dtype=object,
-    )
-
-    for i, m in enumerate(raw_v.index):
-        for j, b in enumerate(raw_v.columns):
-            display.iloc[i, j] = format_value(
-                num_v.iloc[i, j],
-                formats[m],
-                raw_v.iloc[i, j],
-            )
-
     st.dataframe(
         display,
-        use_container_width=True,
-    )
-
-    pdf_file = create_pdf_report(display, source_label)
-
-    st.download_button(
-        label="📄 Download PDF Report",
-        data=pdf_file,
-        file_name="DTMC_Stats_Report.pdf",
-        mime="application/pdf",
         use_container_width=True,
     )
 
@@ -413,73 +520,6 @@ with tab_heat:
     )
 
     st.plotly_chart(heat, use_container_width=True)
-
-
-def _metric_bar_fig(metric, fmt):
-    row_position = list(num_v.index).index(metric)
-    series = num_v.iloc[row_position].dropna()
-
-    if series.empty:
-        return None
-
-    if fmt == "percent" and abs(series).max() <= 1:
-        series = series * 100
-
-    frame = series.reset_index()
-    frame.columns = ["Bank", "Value"]
-
-    if sort_charts:
-        frame = frame.sort_values("Value", ascending=False)
-
-    diverging = (frame["Value"] < 0).any()
-
-    if diverging:
-        colors = [POS if v >= 0 else NEG for v in frame["Value"]]
-    else:
-        colors = [ACCENT] * len(frame)
-
-    if highlight != "(none)":
-        colors = [
-            "#e08a1e" if b == highlight else c
-            for b, c in zip(frame["Bank"], colors)
-        ]
-
-    if fmt == "currency":
-        texttmpl = "$%{y:,.0f}"
-        hovertmpl = "%{x}<br>$%{y:,.0f}<extra></extra>"
-        axfmt = "$,.0f"
-    elif fmt == "percent":
-        texttmpl = "%{y:.2f}%"
-        hovertmpl = "%{x}<br>%{y:.2f}%<extra></extra>"
-        axfmt = ".1f"
-    else:
-        texttmpl = "%{y:,.2f}"
-        hovertmpl = "%{x}<br>%{y:,.2f}<extra></extra>"
-        axfmt = ",.2f"
-
-    fig = go.Figure(
-        go.Bar(
-            x=frame["Bank"],
-            y=frame["Value"],
-            marker_color=colors,
-            text=frame["Value"],
-            texttemplate=texttmpl,
-            textposition="outside",
-            hovertemplate=hovertmpl,
-            cliponaxis=False,
-        )
-    )
-
-    fig.update_layout(
-        title=dict(text=clean_metric_name(metric), font=dict(size=14)),
-        height=300,
-        margin=dict(l=10, r=10, t=42, b=10),
-        yaxis=dict(tickformat=axfmt, title=""),
-        xaxis=dict(title=""),
-        showlegend=False,
-    )
-
-    return fig
 
 
 with tab_charts:
