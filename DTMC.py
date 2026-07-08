@@ -30,7 +30,6 @@ EXCEL_PATH = os.path.join(
 )
 
 METRIC_COL = "In MM (CAD)"
-
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
 
 PERFORMANCE_KEYWORDS = (
@@ -246,34 +245,48 @@ def create_pdf_report(display_df, source_label, chart_figs):
 
     elements.append(table)
 
+    chart_export_failed = False
+
     if chart_figs:
         elements.append(PageBreak())
         elements.append(Paragraph("Charts", styles["Title"]))
         elements.append(Spacer(1, 12))
 
         for fig in chart_figs:
-            img_bytes = fig.to_image(
-                format="png",
-                width=900,
-                height=450,
-                scale=2,
-            )
-
-            img_buffer = io.BytesIO(img_bytes)
-
-            elements.append(
-                Image(
-                    img_buffer,
-                    width=9.5 * inch,
-                    height=4.75 * inch,
+            try:
+                img_bytes = fig.to_image(
+                    format="png",
+                    width=900,
+                    height=450,
+                    scale=2,
                 )
-            )
-            elements.append(Spacer(1, 16))
+
+                img_buffer = io.BytesIO(img_bytes)
+
+                elements.append(
+                    Image(
+                        img_buffer,
+                        width=9.5 * inch,
+                        height=4.75 * inch,
+                    )
+                )
+                elements.append(Spacer(1, 16))
+
+            except Exception:
+                chart_export_failed = True
+                continue
+
+    if chart_export_failed:
+        elements.append(Spacer(1, 12))
+        elements.append(Paragraph(
+            "Note: Some charts could not be exported because Chrome/Kaleido is not available in the deployment environment.",
+            styles["Normal"],
+        ))
 
     doc.build(elements)
-
     buffer.seek(0)
-    return buffer
+
+    return buffer, chart_export_failed
 
 
 st.set_page_config(
@@ -464,13 +477,25 @@ for metric in sel_metrics:
         chart_figs_for_pdf.append(fig)
 
 
+pdf_file, chart_export_failed = create_pdf_report(
+    display,
+    source_label,
+    chart_figs_for_pdf,
+)
+
 st.download_button(
     label="📄 Download PDF Report with Table and Charts",
-    data=create_pdf_report(display, source_label, chart_figs_for_pdf),
+    data=pdf_file,
     file_name="DTMC_Stats_Report_with_Charts.pdf",
     mime="application/pdf",
     use_container_width=True,
 )
+
+if chart_export_failed:
+    st.warning(
+        "PDF was created, but charts could not be exported. "
+        "Add `chromium` to packages.txt on Streamlit Cloud."
+    )
 
 
 tab_charts, tab_table, tab_heat = st.tabs([
@@ -481,10 +506,7 @@ tab_charts, tab_table, tab_heat = st.tabs([
 
 
 with tab_table:
-    st.dataframe(
-        display,
-        use_container_width=True,
-    )
+    st.dataframe(display, use_container_width=True)
 
 
 with tab_heat:
