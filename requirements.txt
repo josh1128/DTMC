@@ -4,3 +4,4 @@ pandas>=2.0
 reportlab>=4.0
 matplotlib>=3.7
 openpyxl
+kaleido
