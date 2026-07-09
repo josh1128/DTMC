@@ -45,6 +45,31 @@ def bank_region(bank):
     return BANK_REGIONS.get(str(bank).strip(), "Other")
 
 
+# Short display names for chart x-axes (full name still shown on hover).
+# Banks not listed fall back to their full name.
+SHORT_NAMES = {
+    "BNP Paribas": "BNP",
+    "Merrill Lynch": "ML",
+    "Citibank NA": "Citi",
+    "Desjardins": "DESJ",
+}
+
+
+def short_name(bank):
+    return SHORT_NAMES.get(str(bank).strip(), str(bank))
+
+
+def compact_label(value, fmt):
+    """Light on-bar labels: '$109,590' -> '$109.6B' (values are in $MM)."""
+    if fmt == "currency":
+        if abs(value) >= 1000:
+            return f"${value / 1000:,.1f}B"
+        return f"${value:,.0f}"
+    if fmt == "percent":
+        return f"{value:,.1f}%"
+    return f"{value:,.1f}"
+
+
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
 
 # Rows with these names (case-insensitive) are treated as per-bank reporting
@@ -72,9 +97,12 @@ TOPIC_ICONS = {
     TOPIC_MARKET: "💹",
 }
 
-ACCENT = "#1f6f8b"
-POS = "#2a9d4a"
-NEG = "#c0392b"
+ACCENT = "#1f6f8b"   # neutral bars
+NEG = "#c0392b"      # negative values only
+HILITE = "#e08a1e"   # highlighted bank
+GRID_CLR = "#eef2f4"
+ZERO_CLR = "#c9d2d8"
+STRIPE_BG = "#f8fbfc"
 
 
 def make_unique_index(index):
@@ -363,20 +391,18 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
     banks = list(series.index)
     values = series.values
 
-    diverging = (values < 0).any()
-    if diverging:
-        bar_colors = [POS if v >= 0 else NEG for v in values]
-    else:
-        bar_colors = [ACCENT] * len(values)
+    bar_colors = [NEG if v < 0 else ACCENT for v in values]
 
     if highlight != "(none)":
         bar_colors = [
-            "#e08a1e" if b == highlight else c
+            HILITE if b == highlight else c
             for b, c in zip(banks, bar_colors)
         ]
 
     fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
-    bars = ax.bar(banks, values, color=bar_colors)
+    bars = ax.bar([short_name(b) for b in banks], values, color=bar_colors)
+    ax.grid(axis="y", color=GRID_CLR, linewidth=0.6)
+    ax.set_axisbelow(True)
 
     ax.set_title(clean_metric_name(metric), fontsize=10, fontweight="bold")
     ax.axhline(0, color="#888888", linewidth=0.6)
@@ -389,13 +415,13 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
     if fmt == "currency":
         ax.set_ylabel("US$ MM", fontsize=7, color="#666666")
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:,.0f}"))
-        labeller = lambda v: f"${v:,.0f}"
+        labeller = lambda v: compact_label(v, "currency")
     elif fmt == "percent":
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.2f}%"))
-        labeller = lambda v: f"{v:.2f}%"
+        labeller = lambda v: compact_label(v, "percent")
     else:
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.2f}"))
-        labeller = lambda v: f"{v:,.2f}"
+        labeller = lambda v: compact_label(v, "number")
     ax.bar_label(bars, labels=[labeller(v) for v in values], fontsize=6, padding=2)
 
     buf = io.BytesIO()
@@ -688,7 +714,8 @@ if _date_lines:
 
 def show_reporting_dates():
     if as_of_md:
-        st.markdown(as_of_md)
+        with st.container(border=True):
+            st.markdown(as_of_md)
 
 with st.sidebar:
     st.divider()
@@ -756,10 +783,29 @@ with tab_table:
 
     # Keep the reporting dates visible as the last row of the table.
     if report_dates is not None:
-        display.loc["Date"] = [str(report_dates[b]) for b in raw_v.columns]
+        display.loc["Date"] = [long_date_label(report_dates[b])
+                               for b in raw_v.columns]
+
+    neg_mask = num_v.lt(0).values
+
+    def _style(_):
+        css = pd.DataFrame("", index=display.index, columns=display.columns)
+        # Zebra striping to match the theme.
+        for i in range(len(display.index)):
+            if i % 2 == 1:
+                css.iloc[i, :] = f"background-color: {STRIPE_BG};"
+        # Negative values in red.
+        for i in range(neg_mask.shape[0]):
+            for j in range(neg_mask.shape[1]):
+                if neg_mask[i, j]:
+                    css.iloc[i, j] += f" color: {NEG}; font-weight: 600;"
+        # Date row in muted italics.
+        if report_dates is not None:
+            css.iloc[-1, :] += " color: #6b7680; font-style: italic;"
+        return css
 
     st.dataframe(
-        display,
+        display.style.apply(_style, axis=None),
         use_container_width=True,
     )
 
@@ -789,8 +835,10 @@ with tab_heat:
             colorscale="Teal",
             zmin=0,
             zmax=1,
+            xgap=2,
+            ygap=2,
             hovertemplate="%{y}<br>%{x}<br>rank score: %{z:.2f}<extra></extra>",
-            colorbar=dict(title="rel."),
+            colorbar=dict(title="relative", thickness=12),
         )
     )
 
@@ -798,6 +846,7 @@ with tab_heat:
         height=60 + 42 * len(norm.index),
         margin=dict(l=10, r=10, t=10, b=10),
         yaxis=dict(autorange="reversed"),
+        plot_bgcolor="rgba(0,0,0,0)",
     )
 
     st.plotly_chart(heat, use_container_width=True)
@@ -821,16 +870,11 @@ def _metric_bar_fig(metric, fmt):
                                   ascending=[True, False])
     # "File order": keep as-is
 
-    diverging = (frame["Value"] < 0).any()
-
-    if diverging:
-        colors = [POS if v >= 0 else NEG for v in frame["Value"]]
-    else:
-        colors = [ACCENT] * len(frame)
+    colors = [NEG if v < 0 else ACCENT for v in frame["Value"]]
 
     if highlight != "(none)":
         colors = [
-            "#e08a1e" if b == highlight else c
+            HILITE if b == highlight else c
             for b, c in zip(frame["Bank"], colors)
         ]
 
@@ -845,27 +889,26 @@ def _metric_bar_fig(metric, fmt):
                        + "  ·  ".join(subline_parts) + "</sup>")
 
     if fmt == "currency":
-        texttmpl = "$%{y:,.0f}"
-        hovertmpl = "%{x} · %{customdata}<br>$%{y:,.0f}<extra></extra>"
+        hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
+                     "<br>$%{y:,.0f}<extra></extra>")
         axfmt = "$,.0f"
     elif fmt == "percent":
-        texttmpl = "%{y:.2f}%"
-        hovertmpl = "%{x} · %{customdata}<br>%{y:.2f}%<extra></extra>"
+        hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
+                     "<br>%{y:.2f}%<extra></extra>")
         axfmt = ".1f"
     else:
-        texttmpl = "%{y:,.2f}"
-        hovertmpl = "%{x} · %{customdata}<br>%{y:,.2f}<extra></extra>"
+        hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
+                     "<br>%{y:,.2f}<extra></extra>")
         axfmt = ",.2f"
 
     fig = go.Figure(
         go.Bar(
-            x=frame["Bank"],
+            x=[short_name(b) for b in frame["Bank"]],
             y=frame["Value"],
             marker_color=colors,
-            text=frame["Value"],
-            texttemplate=texttmpl,
+            text=[compact_label(v, fmt) for v in frame["Value"]],
             textposition="outside",
-            customdata=frame["Region"],
+            customdata=list(zip(frame["Bank"], frame["Region"])),
             hovertemplate=hovertmpl,
             cliponaxis=False,
         )
@@ -875,8 +918,11 @@ def _metric_bar_fig(metric, fmt):
         title=dict(text=title_text, font=dict(size=14)),
         height=300,
         margin=dict(l=10, r=10, t=48, b=10),
-        yaxis=dict(tickformat=axfmt, title=""),
+        yaxis=dict(tickformat=axfmt, title="", gridcolor=GRID_CLR,
+                   zeroline=True, zerolinecolor=ZERO_CLR),
         xaxis=dict(title=""),
+        plot_bgcolor="rgba(0,0,0,0)",
+        bargap=0.25,
         showlegend=False,
     )
 
