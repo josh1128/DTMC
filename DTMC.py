@@ -605,8 +605,7 @@ def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
 
 
 st.set_page_config(
-    page_title="DTMC Stats Dashboard",
-    page_icon="🏦",
+    page_title="DTMC Dashboard",
     layout="wide",
 )
 
