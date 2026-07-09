@@ -45,6 +45,28 @@ def bank_region(bank):
     return BANK_REGIONS.get(str(bank).strip(), "Other")
 
 
+# Full legal/common names for the legend at the bottom of the page and in
+# the PDF. Banks not listed fall back to their column name.
+BANK_FULL_NAMES = {
+    "TD": "Toronto-Dominion Bank",
+    "RBC": "Royal Bank of Canada",
+    "BNS": "Bank of Nova Scotia (Scotiabank)",
+    "BMO": "Bank of Montreal",
+    "CIBC": "Canadian Imperial Bank of Commerce",
+    "NBC": "National Bank of Canada",
+    "LBC": "Laurentian Bank of Canada",
+    "Desjardins": "Desjardins Group",
+    "ATB": "ATB Financial",
+    "BNP Paribas": "BNP Paribas S.A.",
+    "Merrill Lynch": "Merrill Lynch (Bank of America)",
+    "Citibank NA": "Citibank N.A. (Citigroup)",
+}
+
+
+def full_bank_name(bank):
+    return BANK_FULL_NAMES.get(str(bank).strip(), str(bank))
+
+
 # Short display names for chart x-axes (full name still shown on hover).
 # Banks not listed fall back to their full name.
 SHORT_NAMES = {
@@ -60,10 +82,8 @@ def short_name(bank):
 
 
 def compact_label(value, fmt):
-    """Light on-bar labels: '$109,590' -> '$109.6B' (values are in $MM)."""
+    """On-bar labels. Currency shows the full $MM value."""
     if fmt == "currency":
-        if abs(value) >= 1000:
-            return f"${value / 1000:,.1f}B"
         return f"${value:,.0f}"
     if fmt == "percent":
         return f"{value:,.1f}%"
@@ -527,6 +547,10 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     table.setStyle(TableStyle(style))
     story.append(table)
 
+    # Bank legend under the table.
+    legend = ";  ".join(f"<b>{b}</b> = {full_bank_name(b)}" for b in banks)
+    story += [Spacer(1, 6), Paragraph(legend, subtitle)]
+
     # --- Charts grouped by topic: each topic starts on its own page.
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.6
@@ -605,11 +629,12 @@ def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
 
 
 st.set_page_config(
-    page_title="DTMC Dashboard",
+    page_title="DTMC Stats Dashboard",
+    page_icon="🏦",
     layout="wide",
 )
 
-st.title("DTMC Dashboard")
+st.title("🏦 DTMC Stats Dashboard")
 
 st.caption(f"{SCALE_NOTE} {CONSOLIDATED_NOTE}")
 
@@ -974,3 +999,13 @@ with tab_charts:
 
                 if shown == 0:
                     st.info("No numeric values to chart for this topic.")
+
+
+st.divider()
+
+st.markdown("##### Bank legend")
+
+legend_cols = st.columns(3)
+
+for i, b in enumerate(sel_banks):
+    legend_cols[i % 3].markdown(f"**{b}** — {full_bank_name(b)}")
