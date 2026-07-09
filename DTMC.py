@@ -610,13 +610,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🏦 DTMC Stats Dashboard")
-
-st.caption(
-    f"This dashboard reads data from DTMC stats.xlsx. "
-    f"The first column contains metrics, and the remaining columns contain "
-    f"banks. {SCALE_NOTE} {CONSOLIDATED_NOTE}"
-)
+st.title("DTMC Stats Dashboard")
 
 with st.sidebar:
     st.header("Data")
