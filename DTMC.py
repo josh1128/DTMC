@@ -609,7 +609,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🏦 DTMC Stats Dashboard")
+st.title("DTMC Dashboard")
 
 st.caption(f"{SCALE_NOTE} {CONSOLIDATED_NOTE}")
 
