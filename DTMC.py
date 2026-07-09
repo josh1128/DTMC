@@ -281,28 +281,13 @@ def split_date_row(raw):
     return raw, None
 
 
-def date_caption(dates, banks):
-    """'Reporting date — Apr-26: TD, RBC, … · Dec-25: Desjardins · …'
-    grouping banks that share the same as-of date."""
-    if dates is None:
-        return None
-
-    groups = {}
-    for b in banks:
-        d = str(dates.get(b, "")).strip() or "—"
-        groups.setdefault(d, []).append(b)
-
-    parts = [f"{d}: {', '.join(bs)}" for d, bs in groups.items()]
-    return "Reporting date — " + "  ·  ".join(parts)
-
-
-def quarter_label(date_str):
-    """'Apr-26' → 'Q2, 2026'; '01-Mar-26' → 'Q1, 2026'. Text that isn't a
-    parseable date (e.g. someone types \"Q1'26\" directly) passes through."""
+def long_date_label(date_str):
+    """'Apr-26' or '01-Mar-26' → 'April-2026'. Unparseable text passes
+    through as-is."""
     s = str(date_str).strip()
 
     if not s or s == "—":
-        return ""
+        return "—"
 
     d = None
     for fmt in ("%b-%y", "%d-%b-%y"):
@@ -318,38 +303,21 @@ def quarter_label(date_str):
         except Exception:
             return s
 
-    return f"Q{(d.month - 1) // 3 + 1}, {d.year}"
+    return f"{d.strftime('%B')}-{d.year}"
 
 
-def as_of_label(dates, banks):
-    """Compact 'As of' line for chart titles. Single label when all selected
-    banks share the same quarter, otherwise a chronological range."""
+def date_caption_lines(dates, banks):
+    """One line per reporting date, grouping the banks that share it:
+    ['April-2026 — TD, RBC, …', 'December-2025 — Desjardins', …]"""
     if dates is None:
-        return ""
+        return []
 
-    labels = []
+    groups = {}
     for b in banks:
-        lbl = quarter_label(dates.get(b, ""))
-        if lbl:
-            labels.append(lbl)
+        d = long_date_label(dates.get(b, ""))
+        groups.setdefault(d, []).append(b)
 
-    uniq = list(dict.fromkeys(labels))
-
-    if not uniq:
-        return ""
-
-    if len(uniq) == 1:
-        return f"As of {uniq[0]}"
-
-    def sort_key(lbl):
-        try:
-            q, y = lbl.replace(",", "").split()
-            return (int(y), int(q[1]))
-        except Exception:
-            return (9999, 9)
-
-    uniq.sort(key=sort_key)
-    return f"As of {uniq[0]} – {uniq[-1]}"
+    return [f"{d} — {', '.join(bs)}" for d, bs in groups.items()]
 
 
 def build_numeric(raw):
@@ -372,10 +340,9 @@ def build_numeric(raw):
 # --------------------------------------------------------------------------- #
 # PDF report (reportlab for layout, matplotlib for static charts)
 # --------------------------------------------------------------------------- #
-def _metric_png(metric, num_v, fmt, sort_mode, highlight, as_of):
+def _metric_png(metric, num_v, fmt, sort_mode, highlight):
     """Render one metric's bar chart to PNG bytes with matplotlib (Agg),
-    mirroring the on-screen chart: same colors, ordering, highlight, and
-    as-of subtitle."""
+    mirroring the on-screen chart: same colors, ordering, and highlight."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -411,10 +378,7 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight, as_of):
     fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
     bars = ax.bar(banks, values, color=bar_colors)
 
-    title = clean_metric_name(metric)
-    if as_of:
-        title += f"\n{as_of}"
-    ax.set_title(title, fontsize=9, fontweight="bold")
+    ax.set_title(clean_metric_name(metric), fontsize=10, fontweight="bold")
     ax.axhline(0, color="#888888", linewidth=0.6)
     ax.spines[["top", "right"]].set_visible(False)
     ax.tick_params(axis="x", labelrotation=45, labelsize=7)
@@ -455,7 +419,6 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     metrics = list(raw_v.index)
     banks = list(raw_v.columns)
     dates = dict(dates_items) if dates_items else {}
-    as_of = as_of_label(pd.Series(dates), banks) if dates else ""
     page_w, page_h = landscape(letter)
     margin = 0.5 * inch
     avail_w = page_w - 2 * margin
@@ -494,8 +457,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     for r, bank in enumerate(banks, start=1):
         cells = [Paragraph(bank, row_lbl), bank_region(bank)]
         if dates:
-            cells.append(quarter_label(dates.get(bank, "")) or
-                         str(dates.get(bank, "—")))
+            cells.append(long_date_label(dates.get(bank, "")))
         for c, metric in enumerate(metrics):
             val = num_v.loc[metric, bank]
             cells.append(format_value(val, formats[metric], raw_v.loc[metric, bank]))
@@ -505,7 +467,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 
     first_w = 1.0 * inch
     region_w = 0.7 * inch
-    date_w = 0.55 * inch if dates else 0.0
+    date_w = 0.85 * inch if dates else 0.0
     other_w = (avail_w - first_w - region_w - date_w) / max(len(metrics), 1)
     col_widths = ([first_w, region_w] + ([date_w] if dates else [])
                   + [other_w] * len(metrics))
@@ -537,16 +499,15 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         story += [PageBreak(),
                   Paragraph(topic, styles["Heading2"])]
 
-        cap = date_caption(pd.Series(dates) if dates else None, banks)
-        if cap:
-            story.append(Paragraph(cap, subtitle))
+        for line in date_caption_lines(pd.Series(dates) if dates else None, banks):
+            story.append(Paragraph(line, subtitle))
         story.append(Spacer(1, 4))
 
         pair = []
         chart_rows = []
         for metric in topic_metrics:
             png = _metric_png(metric, num_v, formats[metric],
-                              sort_mode, highlight, as_of)
+                              sort_mode, highlight)
             if png is None:
                 continue
             pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
@@ -715,8 +676,19 @@ if not sel_banks or not sel_metrics:
 raw_v = raw.loc[sel_metrics, sel_banks]
 num_v = numeric.loc[sel_metrics, sel_banks]
 
-as_of_caption = date_caption(report_dates, sel_banks)
-chart_as_of = as_of_label(report_dates, sel_banks)
+# Reporting dates shown under each tab: one clear line per date group.
+_date_lines = date_caption_lines(report_dates, sel_banks)
+as_of_md = None
+if _date_lines:
+    as_of_md = "**Reporting date**  \n" + "  \n".join(
+        f"**{line.split(' — ')[0]}** — {line.split(' — ', 1)[1]}"
+        for line in _date_lines
+    )
+
+
+def show_reporting_dates():
+    if as_of_md:
+        st.markdown(as_of_md)
 
 with st.sidebar:
     st.divider()
@@ -766,8 +738,7 @@ tab_charts, tab_table, tab_heat = st.tabs([
 
 
 with tab_table:
-    if as_of_caption:
-        st.caption(as_of_caption)
+    show_reporting_dates()
 
     display = pd.DataFrame(
         index=[clean_metric_name(m) for m in raw_v.index],
@@ -796,8 +767,7 @@ with tab_table:
 
 
 with tab_heat:
-    if as_of_caption:
-        st.caption(as_of_caption)
+    show_reporting_dates()
 
     norm = num_v.copy()
 
@@ -864,10 +834,8 @@ def _metric_bar_fig(metric, fmt):
             for b, c in zip(frame["Bank"], colors)
         ]
 
-    # Title: metric name, then a small line with as-of quarter and scale.
+    # Title: metric name, plus a small scale note for currency metrics.
     subline_parts = []
-    if chart_as_of:
-        subline_parts.append(chart_as_of)
     if fmt == "currency":
         subline_parts.append("in $ millions (USD)")
 
@@ -932,8 +900,7 @@ with tab_charts:
 
         for page_tab, (topic, page_metrics) in zip(page_tabs, topic_pages):
             with page_tab:
-                if as_of_caption:
-                    st.caption(as_of_caption)
+                show_reporting_dates()
 
                 cols = st.columns(2)
                 shown = 0
@@ -949,32 +916,3 @@ with tab_charts:
 
                 if shown == 0:
                     st.info("No numeric values to chart for this topic.")
-
-
-st.divider()
-
-with st.expander("➕ How to update the dashboard"):
-    st.markdown(
-        """
-The dashboard is driven by **DTMC stats.xlsx**.
-
-- Put **DTMC stats.xlsx** in the same GitHub repository folder as `DTMC.py`.
-- The first column should contain metrics.
-- The remaining columns should contain banks.
-- Add a new column to add a bank.
-- Add a new row to add a metric.
-- Format cells in Excel as **$ / % / date** — the dashboard follows each
-  cell's display format, so `1.42` shown as `142%` in Excel arrives as `142%`.
-- A row named **Date** is treated as each bank's reporting date and shown
-  under every tab (and in the PDF) instead of being charted.
-- Metrics named with *CDS*, *Equity Price*, *spread*, etc. appear under the
-  **💹 Market Indicators** tab.
-- Banks are grouped into regions via the `BANK_REGIONS` mapping at the top of
-  `DTMC.py` — new banks default to "Other" until added there.
-- Merrill Lynch and Citibank NA reflect the consolidated financials of
-  Bank of America and Citigroup, respectively.
-- Use `NA`, `N/A`, `-`, or text like `Meets Req` for unavailable values.
-- The **📄 Download report (PDF)** button in the sidebar exports the table
-  and all charts for whatever is currently selected.
-        """
-    )
