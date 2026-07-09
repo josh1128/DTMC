@@ -1,233 +1,326 @@
-from __future__ import annotations
 
+from __future__ import annotations
+ 
 import os
 import io
 import math
-from datetime import datetime
-
+from datetime import datetime, date
+ 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-
+ 
 EXCEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "DTMC stats.xlsx"
 )
-
-METRIC_COL = "In MM (CAD)"
-
+ 
+METRIC_COL = "In MM (USD)"
+ 
+SCALE_NOTE = "Revenue and Net Income are in USD millions ($MM)."
+ 
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
-
+ 
+# Rows with these names (case-insensitive) are treated as per-bank reporting
+# dates, not metrics: pulled out of the charts/heatmap and shown as captions.
+DATE_ROW_NAMES = {"date", "as of", "as-of", "as of date", "reporting date"}
+ 
 PERFORMANCE_KEYWORDS = (
     "revenue", "income", "earnings", "profit", "margin",
     "yoy", "growth", "eps", "roe", "roa"
 )
-
+ 
+# Checked BEFORE the performance keywords, so "Equity Price" doesn't get
+# claimed by another topic.
+MARKET_KEYWORDS = (
+    "cds", "equity price", "share price", "stock", "spread", "market"
+)
+ 
 TOPIC_PERFORMANCE = "Financial Performance"
 TOPIC_RISK = "Capital, Liquidity & Credit Quality"
-
+TOPIC_MARKET = "Market Indicators"
+ 
+TOPIC_ICONS = {
+    TOPIC_PERFORMANCE: "📈",
+    TOPIC_RISK: "🛡️",
+    TOPIC_MARKET: "💹",
+}
+ 
 ACCENT = "#1f6f8b"
 POS = "#2a9d4a"
 NEG = "#c0392b"
-
-
+ 
+ 
 def make_unique_index(index):
     counts = {}
     new_index = []
-
+ 
     for item in index:
         item = str(item).strip()
-
+ 
         if item not in counts:
             counts[item] = 1
             new_index.append(item)
         else:
             counts[item] += 1
             new_index.append(f"{item} ({counts[item]})")
-
+ 
     return new_index
-
-
+ 
+ 
 def clean_metric_name(metric):
     metric = str(metric)
-
+ 
     if metric.endswith(")") and " (" in metric:
         base, suffix = metric.rsplit(" (", 1)
         if suffix[:-1].isdigit():
             return base
-
+ 
     return metric
-
-
+ 
+ 
 def parse_value(raw):
     if raw is None:
         return None
-
+ 
     try:
         if pd.isna(raw):
             return None
     except Exception:
         pass
-
+ 
     s = str(raw).strip()
-
+ 
     if s.lower() in MISSING_TOKENS:
         return None
-
+ 
     negative = False
-
+ 
     if s.startswith("(") and s.endswith(")"):
         negative = True
         s = s[1:-1]
-
+ 
     s = s.replace("$", "").replace(",", "").replace("%", "").strip()
-
+ 
     if s.startswith("-"):
         negative = True
         s = s[1:]
-
+ 
     try:
         value = float(s)
     except ValueError:
         return None
-
+ 
     return -value if negative else value
-
-
+ 
+ 
 def detect_format(metric_name, raw_values):
     name = clean_metric_name(metric_name).lower()
     cells = [str(v) for v in raw_values if v is not None]
-
+ 
     currency_keywords = ["revenue", "income"]
     percent_keywords = [
         "%", "yoy", "ratio", "lcr", "npas", "loans",
         "equity price", "cet", "roe", "roa"
     ]
-
+ 
     if any(k in name for k in currency_keywords):
         return "currency"
-
+ 
     if any(k in name for k in percent_keywords) or any("%" in c for c in cells):
         return "percent"
-
+ 
     if any("$" in c for c in cells):
         return "currency"
-
+ 
     return "number"
-
-
+ 
+ 
 def format_value(value, fmt, original=""):
     try:
         if pd.isna(value):
             return str(original) if original not in (None, "") else "—"
     except Exception:
         return str(original)
-
+ 
     try:
         value = float(value)
     except Exception:
         return str(original)
-
+ 
     if fmt == "currency":
         return f"${value:,.0f}"
-
+ 
     if fmt == "percent":
-        if abs(value) <= 1:
-            value = value * 100
+        # Values arrive already scaled (the loader converts Excel's stored
+        # fractions using each cell's display format), so no ×100 guessing.
         return f"{value:.2f}%"
-
+ 
     return f"{value:,.2f}"
-
-
+ 
+ 
 def group_metrics_by_topic(metrics, formats):
-    perf, risk = [], []
-
+    perf, risk, market = [], [], []
+ 
     for m in metrics:
         name = clean_metric_name(m).lower()
-
-        if formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
+ 
+        if any(k in name for k in MARKET_KEYWORDS):
+            market.append(m)
+        elif formats.get(m) == "currency" or any(k in name for k in PERFORMANCE_KEYWORDS):
             perf.append(m)
         else:
             risk.append(m)
-
-    if metrics and (not perf or not risk):
+ 
+    # Fallback: if everything landed in a single bucket, split evenly across
+    # the first two topics so the pages are still useful.
+    buckets = [perf, risk, market]
+    if metrics and sum(1 for b in buckets if b) == 1:
         half = math.ceil(len(metrics) / 2)
-        perf, risk = list(metrics[:half]), list(metrics[half:])
-
-    return [(TOPIC_PERFORMANCE, perf), (TOPIC_RISK, risk)]
-
-
+        perf, risk, market = list(metrics[:half]), list(metrics[half:]), []
+ 
+    return [
+        (TOPIC_PERFORMANCE, perf),
+        (TOPIC_RISK, risk),
+        (TOPIC_MARKET, market),
+    ]
+ 
+ 
 def load_raw(source):
-    df = pd.read_excel(
-        source,
-        dtype=str,
-        keep_default_na=False,
-        engine="openpyxl"
-    ).fillna("")
-
-    df = df.rename(columns={df.columns[0]: METRIC_COL})
+    """Load the Excel sheet using each cell's DISPLAY format, so a cell stored
+    as 1.42 with a percent format arrives as '142%', 0.0054 as '0.54%', and
+    59180 with a '$' format as '$59,180'. This fixes the LCR scaling issue and
+    removes the need for any ×100 heuristics downstream. Dates are rendered
+    per their format ('mmm-yy' → 'Apr-26', 'dd-mmm-yy' → '01-Mar-26'). Text
+    like 'Meets Req' or 'NA' passes through verbatim."""
+    from openpyxl import load_workbook
+ 
+    wb = load_workbook(source, data_only=True)
+    ws = wb.active
+ 
+    def cell_to_str(cell):
+        v = cell.value
+ 
+        if v is None:
+            return ""
+ 
+        if isinstance(v, str):
+            return v.strip()
+ 
+        fmt = (cell.number_format or "").lower()
+ 
+        if isinstance(v, (datetime, date)):
+            if "d" in fmt:
+                return v.strftime("%d-%b-%y")
+            return v.strftime("%b-%y")
+ 
+        if "%" in fmt:
+            return f"{round(v * 100, 4):g}%"
+ 
+        if "$" in fmt:
+            return f"${v:,.0f}"
+ 
+        if isinstance(v, float) and v == int(v):
+            return str(int(v))
+ 
+        return str(v)
+ 
+    rows = [[cell_to_str(c) for c in row] for row in ws.iter_rows()]
+ 
+    if not rows:
+        return pd.DataFrame(columns=[METRIC_COL]).set_index(METRIC_COL)
+ 
+    header = [h if h else f"Column {i}" for i, h in enumerate(rows[0])]
+    header[0] = METRIC_COL
+ 
+    body = [r for r in rows[1:] if r and str(r[0]).strip()]
+ 
+    df = pd.DataFrame(body, columns=header)
     df = df.set_index(METRIC_COL)
     df.index = make_unique_index(df.index)
-
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.loc[:, [c for c in df.columns if c and not c.startswith("Column ")]]
+ 
     return df
-
-
+ 
+ 
+def split_date_row(raw):
+    """Pull the per-bank reporting-date row (e.g. 'Date') out of the metrics.
+ 
+    Returns (metrics_frame, date_series_or_None)."""
+    for m in raw.index:
+        if clean_metric_name(m).strip().lower() in DATE_ROW_NAMES:
+            dates = raw.loc[m]
+            return raw.drop(index=m), dates
+    return raw, None
+ 
+ 
+def date_caption(dates, banks):
+    """'Reporting date — Apr-26: TD, RBC, … · Dec-25: Desjardins · …'
+    grouping banks that share the same as-of date."""
+    if dates is None:
+        return None
+ 
+    groups = {}
+    for b in banks:
+        d = str(dates.get(b, "")).strip() or "—"
+        groups.setdefault(d, []).append(b)
+ 
+    parts = [f"{d}: {', '.join(bs)}" for d, bs in groups.items()]
+    return "Reporting date — " + "  ·  ".join(parts)
+ 
+ 
 def build_numeric(raw):
     formats = {}
     numeric_rows = []
-
+ 
     for metric, row in raw.iterrows():
         formats[metric] = detect_format(metric, row.tolist())
         numeric_rows.append([parse_value(v) for v in row])
-
+ 
     numeric = pd.DataFrame(
         numeric_rows,
         index=raw.index,
         columns=raw.columns
     )
-
+ 
     return numeric.astype("float64"), formats
-
-
+ 
+ 
 # --------------------------------------------------------------------------- #
 # PDF report (reportlab for layout, matplotlib for static charts)
 # --------------------------------------------------------------------------- #
 def _metric_png(metric, num_v, fmt, sort_by_value, highlight):
     """Render one metric's bar chart to PNG bytes with matplotlib (Agg),
-    mirroring the on-screen chart: same percent scaling, colors, sorting,
-    and bank highlight."""
+    mirroring the on-screen chart: same colors, sorting, and bank highlight."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
-
+ 
     series = num_v.loc[metric].dropna()
-
+ 
     if series.empty:
         return None
-
-    # Same rule as the on-screen charts: Excel stores percents as fractions.
-    if fmt == "percent" and abs(series).max() <= 1:
-        series = series * 100
-
+ 
     if sort_by_value:
         series = series.sort_values(ascending=False)
-
+ 
     banks = list(series.index)
     values = series.values
-
+ 
     diverging = (values < 0).any()
     if diverging:
         bar_colors = [POS if v >= 0 else NEG for v in values]
     else:
         bar_colors = [ACCENT] * len(values)
-
+ 
     if highlight != "(none)":
         bar_colors = [
             "#e08a1e" if b == highlight else c
             for b, c in zip(banks, bar_colors)
         ]
-
+ 
     fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
     bars = ax.bar(banks, values, color=bar_colors)
     ax.set_title(clean_metric_name(metric), fontsize=10, fontweight="bold")
@@ -237,8 +330,9 @@ def _metric_png(metric, num_v, fmt, sort_by_value, highlight):
     for lbl in ax.get_xticklabels():
         lbl.set_ha("right")
     ax.tick_params(axis="y", labelsize=7)
-
+ 
     if fmt == "currency":
+        ax.set_ylabel("US$ MM", fontsize=7, color="#666666")
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:,.0f}"))
         labeller = lambda v: f"${v:,.0f}"
     elif fmt == "percent":
@@ -248,29 +342,32 @@ def _metric_png(metric, num_v, fmt, sort_by_value, highlight):
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.2f}"))
         labeller = lambda v: f"{v:,.2f}"
     ax.bar_label(bars, labels=[labeller(v) for v in values], fontsize=6, padding=2)
-
+ 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
     plt.close(fig)
     return buf.getvalue()
-
-
-def build_pdf_report(raw_v, num_v, formats, source_label, sort_by_value, highlight):
-    """Assemble a landscape PDF: title + comparison table on page 1, then the
-    charts grouped by topic -- each topic starts on its own landscape page."""
+ 
+ 
+def build_pdf_report(raw_v, num_v, formats, source_label,
+                     sort_by_value, highlight, dates_items):
+    """Assemble a landscape PDF: title + comparison table (with an 'As of'
+    column when reporting dates exist) on page 1, then charts grouped by
+    topic -- each topic starts on its own landscape page."""
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
                                     Table, TableStyle, Image, PageBreak)
-
+ 
     metrics = list(raw_v.index)
     banks = list(raw_v.columns)
+    dates = dict(dates_items) if dates_items else {}
     page_w, page_h = landscape(letter)
     margin = 0.5 * inch
     avail_w = page_w - 2 * margin
-
+ 
     styles = getSampleStyleSheet()
     h_cell = ParagraphStyle("hcell", parent=styles["Normal"], fontSize=6.5,
                             leading=8, textColor=colors.white,
@@ -279,42 +376,48 @@ def build_pdf_report(raw_v, num_v, formats, source_label, sort_by_value, highlig
                              leading=8, fontName="Helvetica-Bold")
     subtitle = ParagraphStyle("sub", parent=styles["Normal"], fontSize=8,
                               textColor=colors.HexColor("#666666"))
-
+ 
     story = [
         Paragraph("DTMC Stats Report", styles["Title"]),
         Paragraph(
             f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
             f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
-            f"&nbsp;|&nbsp; source: {source_label}",
+            f"&nbsp;|&nbsp; source: {source_label} &nbsp;|&nbsp; {SCALE_NOTE}",
             subtitle,
         ),
         Spacer(1, 10),
     ]
-
+ 
     # --- Comparison table (banks as rows so it grows down the page).
-    header = [Paragraph("Bank", h_cell)] + [
-        Paragraph(clean_metric_name(m), h_cell) for m in metrics
-    ]
+    header = [Paragraph("Bank", h_cell)]
+    if dates:
+        header.append(Paragraph("As of", h_cell))
+    header += [Paragraph(clean_metric_name(m), h_cell) for m in metrics]
+ 
+    n_lead = 2 if dates else 1  # label columns before the metric columns
     table_data = [header]
     red_cells = []  # (col, row) coords of negative values
-
+ 
     for r, bank in enumerate(banks, start=1):
         cells = [Paragraph(bank, row_lbl)]
-        for c, metric in enumerate(metrics, start=1):
+        if dates:
+            cells.append(str(dates.get(bank, "—")))
+        for c, metric in enumerate(metrics):
             val = num_v.loc[metric, bank]
             cells.append(format_value(val, formats[metric], raw_v.loc[metric, bank]))
             if pd.notna(val) and val < 0:
-                red_cells.append((c, r))
+                red_cells.append((c + n_lead, r))
         table_data.append(cells)
-
+ 
     first_w = 1.0 * inch
-    other_w = (avail_w - first_w) / max(len(metrics), 1)
-    table = Table(table_data, colWidths=[first_w] + [other_w] * len(metrics),
-                  repeatRows=1)
+    date_w = 0.55 * inch if dates else 0.0
+    other_w = (avail_w - first_w - date_w) / max(len(metrics), 1)
+    col_widths = [first_w] + ([date_w] if dates else []) + [other_w] * len(metrics)
+    table = Table(table_data, colWidths=col_widths, repeatRows=1)
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(ACCENT)),
         ("FONTSIZE", (0, 1), (-1, -1), 7),
-        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+        ("ALIGN", (n_lead - 1, 1), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1),
@@ -326,19 +429,23 @@ def build_pdf_report(raw_v, num_v, formats, source_label, sort_by_value, highlig
         style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(NEG)))
     table.setStyle(TableStyle(style))
     story.append(table)
-
+ 
     # --- Charts grouped by topic: each topic starts on its own page.
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.6
-
+ 
     for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
         if not topic_metrics:
             continue
-
+ 
         story += [PageBreak(),
-                  Paragraph(topic, styles["Heading2"]),
-                  Spacer(1, 4)]
-
+                  Paragraph(topic, styles["Heading2"])]
+ 
+        cap = date_caption(pd.Series(dates) if dates else None, banks)
+        if cap:
+            story.append(Paragraph(cap, subtitle))
+        story.append(Spacer(1, 4))
+ 
         pair = []
         chart_rows = []
         for metric in topic_metrics:
@@ -362,15 +469,16 @@ def build_pdf_report(raw_v, num_v, formats, source_label, sort_by_value, highlig
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
             ]))
             story.append(grid)
-
+ 
     def _footer(canvas, doc):
         canvas.saveState()
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.HexColor("#999999"))
         canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
-        canvas.drawString(margin, 0.3 * inch, "DTMC Stats Report — in MM (CAD)")
+        canvas.drawString(margin, 0.3 * inch,
+                          "DTMC Stats Report — Revenue & Net Income in MM (USD)")
         canvas.restoreState()
-
+ 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(letter),
                             leftMargin=margin, rightMargin=margin,
@@ -378,125 +486,131 @@ def build_pdf_report(raw_v, num_v, formats, source_label, sort_by_value, highlig
                             title="DTMC Stats Report")
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return buf.getvalue()
-
-
+ 
+ 
 @st.cache_data(show_spinner="Building PDF report…")
 def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
-                     sort_by_value, highlight):
+                     sort_by_value, highlight, dates_items):
     """Cached wrapper so the PDF only rebuilds when the data, selection,
     sort order, or highlight changes."""
     raw_v = pd.read_csv(io.StringIO(raw_csv), dtype=str,
                         keep_default_na=False).fillna("")
     raw_v = raw_v.set_index(raw_v.columns[0])
     raw_v = raw_v.loc[list(metrics), list(banks)]
-
+ 
     formats = dict(formats_items)
-
+ 
     numeric_rows = [[parse_value(v) for v in raw_v.loc[m]] for m in raw_v.index]
     num_v = pd.DataFrame(numeric_rows, index=raw_v.index,
                          columns=raw_v.columns).astype("float64")
-
+ 
     return build_pdf_report(raw_v, num_v, formats, source_label,
-                            sort_by_value, highlight)
-
-
+                            sort_by_value, highlight, dates_items)
+ 
+ 
 st.set_page_config(
     page_title="DTMC Stats Dashboard",
     page_icon="🏦",
     layout="wide",
 )
-
+ 
 st.title("🏦 DTMC Stats Dashboard")
-
+ 
 st.caption(
-    "This dashboard reads data from DTMC stats.xlsx. "
-    "The first column contains metrics, and the remaining columns contain banks."
+    f"This dashboard reads data from DTMC stats.xlsx. "
+    f"The first column contains metrics, and the remaining columns contain "
+    f"banks. {SCALE_NOTE}"
 )
-
+ 
 with st.sidebar:
     st.header("Data")
-
+ 
     source_choice = st.radio(
         "Source",
         ["Bundled Excel file", "Upload Excel file"],
         index=0,
     )
-
+ 
     upload = None
-
+ 
     if source_choice == "Upload Excel file":
         upload = st.file_uploader(
             "Excel file: first column = metrics, other columns = banks",
             type=["xlsx"],
         )
-
+ 
     if st.button("🔄 Reload data", use_container_width=True):
         st.rerun()
-
-
+ 
+ 
 try:
     if upload is not None:
-        raw = load_raw(upload)
+        raw = load_raw(io.BytesIO(upload.getvalue()))
         source_label = upload.name
     else:
         raw = load_raw(EXCEL_PATH)
         source_label = os.path.basename(EXCEL_PATH)
-
+ 
 except FileNotFoundError:
     st.error(
         "Could not find `DTMC stats.xlsx`. Make sure it is in the same GitHub repository folder as `DTMC.py`."
     )
     st.stop()
-
+ 
 except Exception as exc:
     st.error(f"Could not read the Excel file: {exc}")
     st.stop()
-
-
+ 
+ 
 if raw.empty or raw.shape[1] == 0:
     st.warning("The Excel file has no bank columns.")
     st.stop()
-
-
+ 
+ 
+# Pull the per-bank reporting-date row out of the metrics.
+raw, report_dates = split_date_row(raw)
+ 
 numeric, formats = build_numeric(raw)
-
+ 
 all_banks = list(raw.columns)
 all_metrics = list(raw.index)
-
+ 
 with st.sidebar:
     st.header("Filters")
-
+ 
     sel_banks = st.multiselect(
         "Banks",
         all_banks,
         default=all_banks,
     )
-
+ 
     sel_metrics = st.multiselect(
         "Metrics",
         all_metrics,
         default=all_metrics,
     )
-
+ 
     st.divider()
-
+ 
     sort_charts = st.checkbox("Sort bars by value", value=True)
-
+ 
     highlight = st.selectbox(
         "Highlight a bank",
         ["(none)"] + sel_banks,
         index=0,
     )
-
-
+ 
+ 
 if not sel_banks or not sel_metrics:
     st.info("Pick at least one bank and one metric.")
     st.stop()
-
-
+ 
+ 
 raw_v = raw.loc[sel_metrics, sel_banks]
 num_v = numeric.loc[sel_metrics, sel_banks]
-
+ 
+as_of_caption = date_caption(report_dates, sel_banks)
+ 
 with st.sidebar:
     st.divider()
     st.header("Report")
@@ -505,7 +619,7 @@ with st.sidebar:
         "page each) for the currently selected banks and metrics, using the "
         "current sort order and highlight."
     )
-
+ 
     try:
         report_bytes = get_report_bytes(
             raw_v.reset_index().to_csv(index=False),
@@ -515,8 +629,10 @@ with st.sidebar:
             source_label,
             sort_charts,
             highlight,
+            tuple((b, str(report_dates[b])) for b in sel_banks)
+            if report_dates is not None else (),
         )
-
+ 
         st.download_button(
             "📄 Download report (PDF)",
             data=report_bytes,
@@ -524,31 +640,34 @@ with st.sidebar:
             mime="application/pdf",
             use_container_width=True,
         )
-
+ 
     except ModuleNotFoundError as exc:
         st.warning(
             f"PDF export needs an extra package: `{exc.name}`. "
             "Install with `pip install reportlab matplotlib` "
             "(add both to requirements.txt if deploying)."
         )
-
+ 
     except Exception as exc:
         st.error(f"Could not build the PDF: {exc}")
-
+ 
 tab_charts, tab_table, tab_heat = st.tabs([
     "📊 Charts",
     "📋 Table",
     "🌡 Heatmap",
 ])
-
-
+ 
+ 
 with tab_table:
+    if as_of_caption:
+        st.caption(as_of_caption)
+ 
     display = pd.DataFrame(
         index=[clean_metric_name(m) for m in raw_v.index],
         columns=raw_v.columns,
         dtype=object,
     )
-
+ 
     for i, m in enumerate(raw_v.index):
         for j, b in enumerate(raw_v.columns):
             display.iloc[i, j] = format_value(
@@ -556,26 +675,35 @@ with tab_table:
                 formats[m],
                 raw_v.iloc[i, j],
             )
-
+ 
+    # Keep the reporting dates visible as the last row of the table.
+    if report_dates is not None:
+        display.loc["Date"] = [str(report_dates[b]) for b in raw_v.columns]
+ 
     st.dataframe(
         display,
         use_container_width=True,
     )
-
-
+ 
+    st.caption(SCALE_NOTE)
+ 
+ 
 with tab_heat:
+    if as_of_caption:
+        st.caption(as_of_caption)
+ 
     norm = num_v.copy()
-
+ 
     for i, _ in enumerate(norm.index):
         row = norm.iloc[i]
         lo = row.min()
         hi = row.max()
-
+ 
         if pd.isna(lo) or pd.isna(hi) or hi == lo:
             norm.iloc[i] = 0.5
         else:
             norm.iloc[i] = (row - lo) / (hi - lo)
-
+ 
     heat = go.Figure(
         go.Heatmap(
             z=norm.values,
@@ -588,46 +716,46 @@ with tab_heat:
             colorbar=dict(title="rel."),
         )
     )
-
+ 
     heat.update_layout(
         height=60 + 42 * len(norm.index),
         margin=dict(l=10, r=10, t=10, b=10),
         yaxis=dict(autorange="reversed"),
     )
-
+ 
     st.plotly_chart(heat, use_container_width=True)
-
-
+ 
+ 
 def _metric_bar_fig(metric, fmt):
     row_position = list(num_v.index).index(metric)
     series = num_v.iloc[row_position].dropna()
-
+ 
     if series.empty:
         return None
-
-    if fmt == "percent" and abs(series).max() <= 1:
-        series = series * 100
-
+ 
     frame = series.reset_index()
     frame.columns = ["Bank", "Value"]
-
+ 
     if sort_charts:
         frame = frame.sort_values("Value", ascending=False)
-
+ 
     diverging = (frame["Value"] < 0).any()
-
+ 
     if diverging:
         colors = [POS if v >= 0 else NEG for v in frame["Value"]]
     else:
         colors = [ACCENT] * len(frame)
-
+ 
     if highlight != "(none)":
         colors = [
             "#e08a1e" if b == highlight else c
             for b, c in zip(frame["Bank"], colors)
         ]
-
+ 
+    title_text = clean_metric_name(metric)
+ 
     if fmt == "currency":
+        title_text += "<br><sup style='color:#8a949c'>in $ millions (USD)</sup>"
         texttmpl = "$%{y:,.0f}"
         hovertmpl = "%{x}<br>$%{y:,.0f}<extra></extra>"
         axfmt = "$,.0f"
@@ -639,7 +767,7 @@ def _metric_bar_fig(metric, fmt):
         texttmpl = "%{y:,.2f}"
         hovertmpl = "%{x}<br>%{y:,.2f}<extra></extra>"
         axfmt = ",.2f"
-
+ 
     fig = go.Figure(
         go.Bar(
             x=frame["Bank"],
@@ -652,67 +780,76 @@ def _metric_bar_fig(metric, fmt):
             cliponaxis=False,
         )
     )
-
+ 
     fig.update_layout(
-        title=dict(text=clean_metric_name(metric), font=dict(size=14)),
+        title=dict(text=title_text, font=dict(size=14)),
         height=300,
-        margin=dict(l=10, r=10, t=42, b=10),
+        margin=dict(l=10, r=10, t=48, b=10),
         yaxis=dict(tickformat=axfmt, title=""),
         xaxis=dict(title=""),
         showlegend=False,
     )
-
+ 
     return fig
-
-
+ 
+ 
 with tab_charts:
     topic_pages = [
         (t, ms)
         for t, ms in group_metrics_by_topic(sel_metrics, formats)
         if ms
     ]
-
+ 
     if not topic_pages:
         st.info("No chartable metrics.")
     else:
         page_tabs = st.tabs([
-            f"{'📈' if t == TOPIC_PERFORMANCE else '🛡️'} {t} ({len(ms)})"
+            f"{TOPIC_ICONS.get(t, '📊')} {t} ({len(ms)})"
             for t, ms in topic_pages
         ])
-
+ 
         for page_tab, (topic, page_metrics) in zip(page_tabs, topic_pages):
             with page_tab:
+                if as_of_caption:
+                    st.caption(as_of_caption)
+ 
                 cols = st.columns(2)
                 shown = 0
-
+ 
                 for metric in page_metrics:
                     fig = _metric_bar_fig(metric, formats[metric])
-
+ 
                     if fig is None:
                         continue
-
+ 
                     cols[shown % 2].plotly_chart(fig, use_container_width=True)
                     shown += 1
-
+ 
                 if shown == 0:
                     st.info("No numeric values to chart for this topic.")
-
-
+ 
+ 
 st.divider()
-
+ 
 with st.expander("➕ How to update the dashboard"):
     st.markdown(
         """
 The dashboard is driven by **DTMC stats.xlsx**.
-
+ 
 - Put **DTMC stats.xlsx** in the same GitHub repository folder as `DTMC.py`.
 - The first column should contain metrics.
 - The remaining columns should contain banks.
 - Add a new column to add a bank.
 - Add a new row to add a metric.
-- Use `$` for currency and `%` for percentage values.
+- Format cells in Excel as **$ / % / date** — the dashboard follows each
+  cell's display format, so `1.42` shown as `142%` in Excel arrives as `142%`.
+- A row named **Date** is treated as each bank's reporting date and shown
+  under every tab (and in the PDF) instead of being charted.
+- Metrics named with *CDS*, *Equity Price*, *spread*, etc. appear under the
+  **💹 Market Indicators** tab.
 - Use `NA`, `N/A`, `-`, or text like `Meets Req` for unavailable values.
 - The **📄 Download report (PDF)** button in the sidebar exports the table
   and all charts for whatever is currently selected.
         """
     )
+ 
