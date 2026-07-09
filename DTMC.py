@@ -133,6 +133,19 @@ def clean_metric_name(metric):
     return metric
 
 
+def display_labels(metrics):
+    """Cleaned metric names made unique again for pandas (Styler requires a
+    unique index). Duplicates get zero-width spaces appended, so 'YoY (▲%)'
+    can appear twice looking identical while remaining distinct labels."""
+    seen = {}
+    labels = []
+    for m in metrics:
+        name = clean_metric_name(m)
+        seen[name] = seen.get(name, 0) + 1
+        labels.append(name + "\u200b" * (seen[name] - 1))
+    return labels
+
+
 def parse_value(raw):
     if raw is None:
         return None
@@ -768,7 +781,7 @@ with tab_table:
     show_reporting_dates()
 
     display = pd.DataFrame(
-        index=[clean_metric_name(m) for m in raw_v.index],
+        index=display_labels(raw_v.index),
         columns=raw_v.columns,
         dtype=object,
     )
