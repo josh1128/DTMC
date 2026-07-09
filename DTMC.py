@@ -82,12 +82,14 @@ def short_name(bank):
 
 
 def compact_label(value, fmt):
-    """On-bar labels. Currency shows the full $MM value."""
+    """On-bar labels. Currency shows the full $MM value; percents and plain
+    numbers drop trailing zeros (142% not 142.00%, 4 not 4.00) so labels stay
+    narrow and don't collide."""
     if fmt == "currency":
         return f"${value:,.0f}"
     if fmt == "percent":
-        return f"{value:,.1f}%"
-    return f"{value:,.1f}"
+        return f"{round(value, 2):g}%"
+    return f"{round(value, 2):g}"
 
 
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
@@ -432,10 +434,11 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
             for b, c in zip(banks, bar_colors)
         ]
 
-    fig, ax = plt.subplots(figsize=(5.0, 3.0), dpi=150)
+    fig, ax = plt.subplots(figsize=(6.4, 3.4), dpi=150)
     bars = ax.bar([short_name(b) for b in banks], values, color=bar_colors)
     ax.grid(axis="y", color=GRID_CLR, linewidth=0.6)
     ax.set_axisbelow(True)
+    ax.margins(y=0.18)  # headroom for the staggered labels
 
     ax.set_title(clean_metric_name(metric), fontsize=10, fontweight="bold")
     ax.axhline(0, color="#888888", linewidth=0.6)
@@ -448,14 +451,22 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
     if fmt == "currency":
         ax.set_ylabel("US$ MM", fontsize=7, color="#666666")
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:,.0f}"))
-        labeller = lambda v: compact_label(v, "currency")
+        fmt_key = "currency"
     elif fmt == "percent":
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.2f}%"))
-        labeller = lambda v: compact_label(v, "percent")
+        ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda v, _: f"{round(v, 2):g}%"))
+        fmt_key = "percent"
     else:
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.2f}"))
-        labeller = lambda v: compact_label(v, "number")
-    ax.bar_label(bars, labels=[labeller(v) for v in values], fontsize=6, padding=2)
+        ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda v, _: f"{round(v, 2):g}"))
+        fmt_key = "number"
+
+    # Stagger labels on two levels so close-valued neighbours never overlap.
+    labels = [compact_label(v, fmt_key) for v in values]
+    for parity, pad in ((0, 2), (1, 12)):
+        level = [lbl if i % 2 == parity else ""
+                 for i, lbl in enumerate(labels)]
+        ax.bar_label(bars, labels=level, fontsize=6, padding=pad)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
