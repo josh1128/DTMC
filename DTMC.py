@@ -610,7 +610,9 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("DTMC Stats Dashboard")
+st.title("🏦 DTMC Stats Dashboard")
+
+st.caption(f"{SCALE_NOTE} {CONSOLIDATED_NOTE}")
 
 with st.sidebar:
     st.header("Data")
@@ -976,4 +978,3 @@ The dashboard is driven by **DTMC stats.xlsx**.
   and all charts for whatever is currently selected.
         """
     )
- 
