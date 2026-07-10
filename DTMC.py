@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -13,6 +14,8 @@ EXCEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "DTMC stats.xlsx"
 )
+
+APP_VERSION = "v10 — 2026-07-10"
 
 METRIC_COL = "In MM (USD)"
 
@@ -558,7 +561,8 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         Paragraph(
             f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
             f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
-            f"&nbsp;|&nbsp; source: {source_label} &nbsp;|&nbsp; {SCALE_NOTE}",
+            f"&nbsp;|&nbsp; source: {source_label} &nbsp;|&nbsp; "
+            f"{SCALE_NOTE} &nbsp;|&nbsp; {APP_VERSION}",
             subtitle,
         ),
         Paragraph(CONSOLIDATED_NOTE, subtitle),
@@ -680,7 +684,8 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 
 @st.cache_data(show_spinner="Building PDF report…")
 def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
-                     sort_mode, highlight, dates_items):
+                     sort_mode, highlight, dates_items,
+                     app_version=APP_VERSION):
     """Cached wrapper so the PDF only rebuilds when the data, selection,
     sort order, or highlight changes."""
     raw_v = pd.read_csv(io.StringIO(raw_csv), dtype=str,
@@ -706,7 +711,7 @@ st.set_page_config(
 
 st.title("🏦 DTMC Stats Dashboard")
 
-st.caption(f"{SCALE_NOTE} {CONSOLIDATED_NOTE}")
+st.caption(f"{SCALE_NOTE} {CONSOLIDATED_NOTE}  \n{APP_VERSION}")
 
 with st.sidebar:
     st.header("Data")
@@ -844,6 +849,7 @@ with st.sidebar:
             highlight,
             tuple((b, str(report_dates[b])) for b in sel_banks)
             if report_dates is not None else (),
+            APP_VERSION,
         )
 
         st.download_button(
