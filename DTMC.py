@@ -124,7 +124,7 @@ TOPIC_ICONS = {
 CDS_NOTE = (
     "CDS spreads: a positive change (widening, red) signals deteriorating "
     "credit perception; a negative change (tightening, green) signals "
-    "improvement — hence the inverted colors on CDS charts."
+    "improvement."
 )
 
 MARKET_NOTE = (
