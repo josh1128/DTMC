@@ -88,8 +88,8 @@ def compact_label(value, fmt):
     if fmt == "currency":
         return f"${value:,.0f}"
     if fmt == "percent":
-        return f"{round(value, 2):g}%"
-    return f"{round(value, 2):g}"
+        return f"{value:,.1f}%"
+    return f"{value:,.1f}"
 
 
 MISSING_TOKENS = {"", "na", "n/a", "n.a.", "-", "—", "nm", "nmf"}
@@ -124,7 +124,7 @@ TOPIC_ICONS = {
 CDS_NOTE = (
     "CDS spreads: a positive change (widening, red) signals deteriorating "
     "credit perception; a negative change (tightening, green) signals "
-    "improvement."
+    "improvement — hence the inverted colors on CDS charts."
 )
 
 MARKET_NOTE = (
@@ -287,9 +287,9 @@ def format_value(value, fmt, original=""):
     if fmt == "percent":
         # Values arrive already scaled (the loader converts Excel's stored
         # fractions using each cell's display format), so no ×100 guessing.
-        return f"{value:.2f}%"
+        return f"{value:,.1f}%"
 
-    return f"{value:,.2f}"
+    return f"{value:,.1f}"
 
 
 def group_metrics_by_topic(metrics, formats):
@@ -505,11 +505,11 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
         fmt_key = "currency"
     elif fmt == "percent":
         ax.yaxis.set_major_formatter(
-            FuncFormatter(lambda v, _: f"{round(v, 2):g}%"))
+            FuncFormatter(lambda v, _: f"{v:,.1f}%"))
         fmt_key = "percent"
     else:
         ax.yaxis.set_major_formatter(
-            FuncFormatter(lambda v, _: f"{round(v, 2):g}"))
+            FuncFormatter(lambda v, _: f"{v:,.1f}"))
         fmt_key = "number"
 
     # Stagger labels on two levels so close-valued neighbours never overlap.
@@ -947,7 +947,7 @@ with tab_heat:
             zmax=1,
             xgap=2,
             ygap=2,
-            hovertemplate="%{y}<br>%{x}<br>rank score: %{z:.2f}<extra></extra>",
+            hovertemplate="%{y}<br>%{x}<br>rank score: %{z:.1f}<extra></extra>",
             colorbar=dict(title="relative", thickness=12),
         )
     )
@@ -1011,12 +1011,12 @@ def _metric_bar_fig(metric, fmt):
         axfmt = "$,.0f"
     elif fmt == "percent":
         hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
-                     "<br>%{y:.2f}%<extra></extra>")
+                     "<br>%{y:.1f}%<extra></extra>")
         axfmt = ".1f"
     else:
         hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
-                     "<br>%{y:,.2f}<extra></extra>")
-        axfmt = ",.2f"
+                     "<br>%{y:,.1f}<extra></extra>")
+        axfmt = ",.1f"
 
     fig = go.Figure(
         go.Bar(
