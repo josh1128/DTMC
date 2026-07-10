@@ -124,19 +124,13 @@ TOPIC_ICONS = {
 # CDS charts invert the color logic: a POSITIVE change (spread widening) is
 # BAD news for credit perception, a NEGATIVE change (tightening) is good.
 CDS_NOTE = (
-    "CDS spreads: a positive change (widening, red) signals deteriorating "
-    "credit perception; a negative change (tightening, green) signals "
-    "improvement — hence the inverted colors on CDS charts."
+    "CDS spreads: widening (red) signals rising perceived credit risk; "
+    "tightening (green) signals improvement."
 )
 
 MARKET_NOTE = (
     "Market indicators are as of June 2026 — the ▲ 3 months change is "
     "measured vs. March 2026, and the ▲ 1 year change vs. June 2025."
-)
-
-LBC_NI_YOY_NOTE = (
-    "Note: LBC YoY change is not included because its previous year's value "
-    "was negative, so it is not economically meaningful."
 )
 
 # (internal metric name, bank) pairs excluded from charts and the heatmap.
@@ -529,9 +523,9 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
 
 def build_pdf_report(raw_v, num_v, formats, source_label,
                      sort_mode, highlight, dates_items):
-    """Assemble a landscape PDF: title + comparison table (with 'Region' and
-    'As of' columns) on page 1, then charts grouped by topic -- each topic
-    starts on its own landscape page."""
+    """Assemble a landscape PDF. Page 1 contains a comparison table without
+    Region, As of, or Market Indicator columns. Notes appear below the table.
+    Charts remain grouped by topic on separate landscape pages."""
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.lib import colors
@@ -542,6 +536,13 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     metrics = list(raw_v.index)
     banks = list(raw_v.columns)
     dates = dict(dates_items) if dates_items else {}
+
+    # Market indicators are excluded from the PDF comparison table only.
+    table_metrics = [
+        m for m in metrics
+        if not any(k in clean_metric_name(m).lower() for k in MARKET_KEYWORDS)
+    ]
+
     page_w, page_h = landscape(letter)
     margin = 0.5 * inch
     avail_w = page_w - 2 * margin
@@ -556,50 +557,43 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
                               textColor=colors.HexColor("#666666"))
 
     story = [
-        Paragraph("DTMC Stats Report", styles["Title"]),
+        Paragraph("DTMC Stats Report — FY 2025", styles["Title"]),
         Paragraph(
             f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
-            f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
-            f"&nbsp;|&nbsp; source: {source_label} &nbsp;|&nbsp; "
-            f"{SCALE_NOTE} &nbsp;|&nbsp; {APP_VERSION}",
+            f"{len(banks)} banks &nbsp;|&nbsp; {len(table_metrics)} table metrics "
+            f"&nbsp;|&nbsp; source: {source_label} &nbsp;|&nbsp; {APP_VERSION}",
             subtitle,
         ),
-        Paragraph(CONSOLIDATED_NOTE, subtitle),
         Spacer(1, 10),
     ]
 
-    # --- Comparison table (banks as rows so it grows down the page).
-    header = [Paragraph("Bank", h_cell), Paragraph("Region", h_cell)]
-    if dates:
-        header.append(Paragraph("As of", h_cell))
-    header += [Paragraph(display_metric_name(m), h_cell) for m in metrics]
+    # --- Comparison table: Bank + non-market metrics only.
+    header = [Paragraph("Bank", h_cell)]
+    header += [Paragraph(display_metric_name(m), h_cell) for m in table_metrics]
 
-    n_lead = 3 if dates else 2  # label columns before the metric columns
     table_data = [header]
-    red_cells = []  # (col, row) coords of negative values
+    red_cells = []
 
     for r, bank in enumerate(banks, start=1):
-        cells = [Paragraph(bank, row_lbl), bank_region(bank)]
-        if dates:
-            cells.append(long_date_label(dates.get(bank, "")))
-        for c, metric in enumerate(metrics):
+        cells = [Paragraph(bank, row_lbl)]
+        for c, metric in enumerate(table_metrics):
             val = num_v.loc[metric, bank]
-            cells.append(format_value(val, formats[metric], raw_v.loc[metric, bank]))
+            cells.append(format_value(
+                val, formats[metric], raw_v.loc[metric, bank]
+            ))
             if pd.notna(val) and val < 0:
-                red_cells.append((c + n_lead, r))
+                red_cells.append((c + 1, r))
         table_data.append(cells)
 
-    first_w = 1.0 * inch
-    region_w = 0.7 * inch
-    date_w = 0.85 * inch if dates else 0.0
-    other_w = (avail_w - first_w - region_w - date_w) / max(len(metrics), 1)
-    col_widths = ([first_w, region_w] + ([date_w] if dates else [])
-                  + [other_w] * len(metrics))
+    first_w = 1.15 * inch
+    other_w = (avail_w - first_w) / max(len(table_metrics), 1)
+    col_widths = [first_w] + [other_w] * len(table_metrics)
+
     table = Table(table_data, colWidths=col_widths, repeatRows=1)
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(ACCENT)),
         ("FONTSIZE", (0, 1), (-1, -1), 7),
-        ("ALIGN", (n_lead - 1, 1), (-1, -1), "CENTER"),
+        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1),
@@ -612,20 +606,30 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     table.setStyle(TableStyle(style))
     story.append(table)
 
-    # Bank legend under the table.
+    # Notes moved below the comparison table.
+    story += [
+        Spacer(1, 6),
+        Paragraph(SCALE_NOTE, subtitle),
+        Paragraph(CONSOLIDATED_NOTE, subtitle),
+    ]
+
+    for line in date_caption_lines(
+            pd.Series(dates) if dates else None, banks):
+        story.append(Paragraph(line, subtitle))
+
+    # Bank legend under the notes.
     legend = ";  ".join(f"<b>{b}</b> = {full_bank_name(b)}" for b in banks)
     story += [Spacer(1, 6), Paragraph(legend, subtitle)]
 
     # --- Charts grouped by topic: each topic starts on its own page.
     img_w = (avail_w - 0.2 * inch) / 2
-    img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
+    img_h = img_w * 0.54
 
     for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
         if not topic_metrics:
             continue
 
-        story += [PageBreak(),
-                  Paragraph(topic, styles["Heading2"])]
+        story += [PageBreak(), Paragraph(topic, styles["Heading2"])]
 
         if topic == TOPIC_MARKET:
             story.append(Paragraph(MARKET_NOTE, subtitle))
@@ -634,9 +638,6 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
             for line in date_caption_lines(
                     pd.Series(dates) if dates else None, banks):
                 story.append(Paragraph(line, subtitle))
-            if topic == TOPIC_PERFORMANCE and "LBC" in banks and any(
-                    m in metrics for (m, _) in CHART_EXCLUSIONS):
-                story.append(Paragraph(LBC_NI_YOY_NOTE, subtitle))
         story.append(Spacer(1, 4))
 
         pair = []
@@ -668,15 +669,19 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.HexColor("#999999"))
         canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
-        canvas.drawString(margin, 0.3 * inch,
-                          "DTMC Stats Report — Revenue & Net Income in MM (USD)")
+        canvas.drawString(
+            margin, 0.3 * inch,
+            "DTMC Stats Report — FY 2025 — Revenue & Net Income in MM (USD)"
+        )
         canvas.restoreState()
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=landscape(letter),
-                            leftMargin=margin, rightMargin=margin,
-                            topMargin=margin, bottomMargin=0.6 * inch,
-                            title="DTMC Stats Report")
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(letter),
+        leftMargin=margin, rightMargin=margin,
+        topMargin=margin, bottomMargin=0.6 * inch,
+        title="DTMC Stats Report — FY 2025",
+    )
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return buf.getvalue()
 
@@ -1073,12 +1078,6 @@ with tab_charts:
                         st.markdown(f"{MARKET_NOTE}  \n{CDS_NOTE}")
                 else:
                     show_reporting_dates()
-                    if (topic == TOPIC_PERFORMANCE
-                            and "LBC" in sel_banks
-                            and any(m in page_metrics
-                                    for (m, _) in CHART_EXCLUSIONS)):
-                        st.caption(LBC_NI_YOY_NOTE)
-
                 cols = st.columns(2)
                 shown = 0
 
