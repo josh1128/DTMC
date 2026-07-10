@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -15,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v10 — 2026-07-10"
+APP_VERSION = "v11 — 2026-07-10"
 
 METRIC_COL = "In MM (USD)"
 
@@ -619,7 +618,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 
     # --- Charts grouped by topic: each topic starts on its own page.
     img_w = (avail_w - 0.2 * inch) / 2
-    img_h = img_w * 0.6
+    img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
 
     for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
         if not topic_metrics:
@@ -660,7 +659,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]))
             story.append(grid)
 
