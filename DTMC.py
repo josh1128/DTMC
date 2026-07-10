@@ -110,7 +110,7 @@ MARKET_KEYWORDS = (
 )
 
 TOPIC_PERFORMANCE = "Financial Performance"
-TOPIC_RISK = "Capital, Liquidity & Credit Quality"
+TOPIC_RISK = "Capital, Liquidity & Asset Quality"
 TOPIC_MARKET = "Market Indicators"
 
 TOPIC_ICONS = {
@@ -119,8 +119,36 @@ TOPIC_ICONS = {
     TOPIC_MARKET: "💹",
 }
 
+# CDS charts invert the color logic: a POSITIVE change (spread widening) is
+# BAD news for credit perception, a NEGATIVE change (tightening) is good.
+CDS_NOTE = (
+    "CDS spreads: a positive change (widening, red) signals deteriorating "
+    "credit perception; a negative change (tightening, green) signals "
+    "improvement — hence the inverted colors on CDS charts."
+)
+
+MARKET_NOTE = (
+    "Market indicators are as of June 2026 — the ▲ 3 months change is "
+    "measured vs. March 2026, and the ▲ 1 year change vs. June 2025."
+)
+
+LBC_NI_YOY_NOTE = (
+    "Note: LBC YoY change is not included because its previous year's value "
+    "was negative, so it is not economically meaningful."
+)
+
+# (internal metric name, bank) pairs excluded from charts and the heatmap.
+# "YoY (▲%) (2)" is the Net Income YoY row (second YoY row in the sheet).
+CHART_EXCLUSIONS = {("YoY (▲%) (2)", "LBC")}
+
+
+def chart_excluded_banks(metric):
+    return [b for (m, b) in CHART_EXCLUSIONS if m == metric]
+
+
 ACCENT = "#1f6f8b"   # neutral bars
-NEG = "#c0392b"      # negative values only
+NEG = "#c0392b"      # negative values only (positive for CDS widening)
+POS = "#2a9d4a"      # CDS tightening only
 HILITE = "#e08a1e"   # highlighted bank
 GRID_CLR = "#eef2f4"
 ZERO_CLR = "#c9d2d8"
@@ -155,6 +183,22 @@ def clean_metric_name(metric):
     return metric
 
 
+def is_cds_metric(metric):
+    return "cds" in clean_metric_name(metric).lower()
+
+
+def display_metric_name(metric):
+    """Chart/table title: cleaned name with '%' markers removed —
+    'Equity Price %(▲ 3 months)' → 'Equity Price (▲ 3 months)',
+    'Gross NPAs/... + OREO (%)' → 'Gross NPAs/... + OREO',
+    'YoY (▲%)' → 'YoY (▲)'."""
+    s = clean_metric_name(metric)
+    s = s.replace("(▲%)", "(▲)")
+    s = s.replace("%(", "(")
+    s = s.replace("(%)", "")
+    return " ".join(s.split())
+
+
 def display_labels(metrics):
     """Cleaned metric names made unique again for pandas (Styler requires a
     unique index). Duplicates get zero-width spaces appended, so 'YoY (▲%)'
@@ -162,7 +206,7 @@ def display_labels(metrics):
     seen = {}
     labels = []
     for m in metrics:
-        name = clean_metric_name(m)
+        name = display_metric_name(m)
         seen[name] = seen.get(name, 0) + 1
         labels.append(name + "\u200b" * (seen[name] - 1))
     return labels
@@ -412,6 +456,8 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
     from matplotlib.ticker import FuncFormatter
 
     series = num_v.loc[metric].dropna()
+    series = series.drop(index=[b for b in chart_excluded_banks(metric)
+                                if b in series.index])
 
     if series.empty:
         return None
@@ -426,7 +472,12 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
     banks = list(series.index)
     values = series.values
 
-    bar_colors = [NEG if v < 0 else ACCENT for v in values]
+    if is_cds_metric(metric):
+        # Inverted: widening (positive) = red, tightening (negative) = green.
+        bar_colors = [NEG if v > 0 else (POS if v < 0 else ACCENT)
+                      for v in values]
+    else:
+        bar_colors = [NEG if v < 0 else ACCENT for v in values]
 
     if highlight != "(none)":
         bar_colors = [
@@ -440,7 +491,7 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight):
     ax.set_axisbelow(True)
     ax.margins(y=0.18)  # headroom for the staggered labels
 
-    ax.set_title(clean_metric_name(metric), fontsize=10, fontweight="bold")
+    ax.set_title(display_metric_name(metric), fontsize=10, fontweight="bold")
     ax.axhline(0, color="#888888", linewidth=0.6)
     ax.spines[["top", "right"]].set_visible(False)
     ax.tick_params(axis="x", labelrotation=45, labelsize=7)
@@ -518,7 +569,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     header = [Paragraph("Bank", h_cell), Paragraph("Region", h_cell)]
     if dates:
         header.append(Paragraph("As of", h_cell))
-    header += [Paragraph(clean_metric_name(m), h_cell) for m in metrics]
+    header += [Paragraph(display_metric_name(m), h_cell) for m in metrics]
 
     n_lead = 3 if dates else 2  # label columns before the metric columns
     table_data = [header]
@@ -573,8 +624,16 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         story += [PageBreak(),
                   Paragraph(topic, styles["Heading2"])]
 
-        for line in date_caption_lines(pd.Series(dates) if dates else None, banks):
-            story.append(Paragraph(line, subtitle))
+        if topic == TOPIC_MARKET:
+            story.append(Paragraph(MARKET_NOTE, subtitle))
+            story.append(Paragraph(CDS_NOTE, subtitle))
+        else:
+            for line in date_caption_lines(
+                    pd.Series(dates) if dates else None, banks):
+                story.append(Paragraph(line, subtitle))
+            if topic == TOPIC_PERFORMANCE and "LBC" in banks and any(
+                    m in metrics for (m, _) in CHART_EXCLUSIONS):
+                story.append(Paragraph(LBC_NI_YOY_NOTE, subtitle))
         story.append(Spacer(1, 4))
 
         pair = []
@@ -864,6 +923,9 @@ with tab_heat:
     show_reporting_dates()
 
     norm = num_v.copy()
+    for m, b in CHART_EXCLUSIONS:
+        if m in norm.index and b in norm.columns:
+            norm.loc[m, b] = float("nan")
 
     for i, _ in enumerate(norm.index):
         row = norm.iloc[i]
@@ -879,7 +941,7 @@ with tab_heat:
         go.Heatmap(
             z=norm.values,
             x=list(norm.columns),
-            y=[clean_metric_name(m) for m in norm.index],
+            y=[display_metric_name(m) for m in norm.index],
             colorscale="Teal",
             zmin=0,
             zmax=1,
@@ -903,6 +965,8 @@ with tab_heat:
 def _metric_bar_fig(metric, fmt):
     row_position = list(num_v.index).index(metric)
     series = num_v.iloc[row_position].dropna()
+    series = series.drop(index=[b for b in chart_excluded_banks(metric)
+                                if b in series.index])
 
     if series.empty:
         return None
@@ -918,7 +982,12 @@ def _metric_bar_fig(metric, fmt):
                                   ascending=[True, False])
     # "File order": keep as-is
 
-    colors = [NEG if v < 0 else ACCENT for v in frame["Value"]]
+    if is_cds_metric(metric):
+        # Inverted: widening (positive) = red, tightening (negative) = green.
+        colors = [NEG if v > 0 else (POS if v < 0 else ACCENT)
+                  for v in frame["Value"]]
+    else:
+        colors = [NEG if v < 0 else ACCENT for v in frame["Value"]]
 
     if highlight != "(none)":
         colors = [
@@ -931,7 +1000,7 @@ def _metric_bar_fig(metric, fmt):
     if fmt == "currency":
         subline_parts.append("in $ millions (USD)")
 
-    title_text = clean_metric_name(metric)
+    title_text = display_metric_name(metric)
     if subline_parts:
         title_text += ("<br><sup style='color:#8a949c'>"
                        + "  ·  ".join(subline_parts) + "</sup>")
@@ -994,7 +1063,16 @@ with tab_charts:
 
         for page_tab, (topic, page_metrics) in zip(page_tabs, topic_pages):
             with page_tab:
-                show_reporting_dates()
+                if topic == TOPIC_MARKET:
+                    with st.container(border=True):
+                        st.markdown(f"{MARKET_NOTE}  \n{CDS_NOTE}")
+                else:
+                    show_reporting_dates()
+                    if (topic == TOPIC_PERFORMANCE
+                            and "LBC" in sel_banks
+                            and any(m in page_metrics
+                                    for (m, _) in CHART_EXCLUSIONS)):
+                        st.caption(LBC_NI_YOY_NOTE)
 
                 cols = st.columns(2)
                 shown = 0
