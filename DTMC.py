@@ -14,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v16 — 2026-07-13"
+APP_VERSION = "v17 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -157,30 +157,54 @@ def chart_excluded_banks(metric):
     return [b for (m, b) in CHART_EXCLUSIONS if m == metric]
 
 
-# Industry-median reference lines, toggleable in the sidebar. Keys are
-# matched against the metric name (case-insensitive substring); each entry
-# is (label, value). Edit values here when benchmarks refresh.
-INDUSTRY_MEDIANS = {
-    "cet 1": [
-        ("Cdn banks + ML: 12.9%", 12.9),
-        ("Citigroup: 15.0%", 15.0),
-        ("BNP Paribas: 17.4%", 17.4),
-    ],
-    "lcr": [
-        ("Cdn banks + ML: 127%", 127.0),
-        ("BNP Paribas: 181%", 181.0),
-    ],
+# Industry-median benchmarks. Each group lists the metrics it covers
+# (matched case-insensitively against metric names) and the reference value
+# for each. Add a group here to make it appear in the sidebar selector.
+INDUSTRY_MEDIAN_GROUPS = {
+    "Canadian banks + Merrill Lynch": {
+        "cet 1": 12.9,
+        "lcr": 127.0,
+    },
+    "Citigroup": {
+        "cet 1": 15.0,
+    },
+    "BNP Paribas": {
+        "cet 1": 17.4,
+        "lcr": 181.0,
+    },
 }
 
-MEDIAN_LINE_COLORS = ["#5b6770", "#8a6d3b", "#6b4b8a"]
+# Colors used for the reference line, keyed to group name.
+MEDIAN_GROUP_COLORS = {
+    "Canadian banks + Merrill Lynch": "#c0392b",  # red
+    "Citigroup":                      "#8a6d3b",  # brown
+    "BNP Paribas":                    "#6b4b8a",  # purple
+}
 
 
-def industry_medians_for(metric):
+def _median_key_for(metric):
+    """Return the config key inside a benchmark group that matches this
+    metric's name, or None."""
     name = clean_metric_name(metric).lower()
-    for key, lines in INDUSTRY_MEDIANS.items():
-        if key in name:
-            return lines
-    return []
+    for group_data in INDUSTRY_MEDIAN_GROUPS.values():
+        for key in group_data:
+            if key in name:
+                return key
+    return None
+
+
+def industry_median_for_group(metric, group):
+    """Return (label, value) for `group`'s benchmark on this metric, or None."""
+    if group not in INDUSTRY_MEDIAN_GROUPS:
+        return None
+    key = _median_key_for(metric)
+    if key is None:
+        return None
+    value = INDUSTRY_MEDIAN_GROUPS[group].get(key)
+    if value is None:
+        return None
+    display = f"{value:g}%" if key in ("cet 1", "lcr") else f"{value:g}"
+    return (f"Industry median — {group}: {display}", value)
 
 
 ACCENT = "#1f6f8b"   # neutral bars
@@ -484,7 +508,7 @@ def build_numeric(raw):
 # --------------------------------------------------------------------------- #
 # PDF report (reportlab for layout, matplotlib for static charts)
 # --------------------------------------------------------------------------- #
-def _metric_png(metric, num_v, fmt, sort_mode, highlight, show_medians):
+def _metric_png(metric, num_v, fmt, sort_mode, highlight, median_group):
     """Render one metric's bar chart to PNG bytes with matplotlib (Agg),
     mirroring the on-screen chart: same colors, ordering, and highlight."""
     import matplotlib
@@ -528,13 +552,18 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight, show_medians):
     ax.set_axisbelow(True)
     ax.margins(y=0.18)  # headroom for the staggered labels
 
-    if show_medians:
-        for i, (label, value) in enumerate(industry_medians_for(metric)):
-            clr = MEDIAN_LINE_COLORS[i % len(MEDIAN_LINE_COLORS)]
-            ax.axhline(value, color=clr, linewidth=0.9, linestyle="--")
-            ax.annotate(label, xy=(1.0, value),
+    if median_group:
+        median = industry_median_for_group(metric, median_group)
+        if median:
+            label, value = median
+            clr = MEDIAN_GROUP_COLORS.get(median_group, "#5b6770")
+            ax.axhline(value, color=clr, linewidth=1.4, linestyle="--")
+            ax.annotate(label, xy=(0.5, value),
                         xycoords=("axes fraction", "data"),
-                        fontsize=6, color=clr, ha="right", va="bottom")
+                        fontsize=7, color=clr, ha="center", va="bottom",
+                        fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  fc="white", ec=clr, lw=0.6))
 
     ax.set_title(display_metric_name(metric), fontsize=10, fontweight="bold")
     ax.axhline(0, color="#888888", linewidth=0.6)
@@ -571,7 +600,7 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight, show_medians):
 
 
 def build_pdf_report(raw_v, num_v, formats, source_label,
-                     sort_mode, highlight, dates_items, show_medians):
+                     sort_mode, highlight, dates_items, median_group):
     """Assemble a landscape PDF: title + comparison table (with 'Region' and
     'As of' columns) on page 1, then charts grouped by topic -- each topic
     starts on its own landscape page."""
@@ -662,6 +691,17 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         Paragraph(CONSOLIDATED_NOTE, subtitle),
     ]
 
+    # Industry median reference note.
+    lines = []
+    for group_name, group_data in INDUSTRY_MEDIAN_GROUPS.items():
+        parts = []
+        for key, value in group_data.items():
+            display_metric = "CET 1 ratio" if key == "cet 1" else key.upper()
+            parts.append(f"{display_metric} {value:g}%")
+        lines.append(f"<b>{group_name}</b> — " + ", ".join(parts))
+    story.append(Paragraph(
+        "Industry medians: " + " &nbsp;·&nbsp; ".join(lines), subtitle))
+
     # --- Charts grouped by topic: each topic starts on its own page.
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
@@ -685,7 +725,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         chart_rows = []
         for metric in topic_metrics:
             png = _metric_png(metric, num_v, formats[metric],
-                              sort_mode, highlight, show_medians)
+                              sort_mode, highlight, median_group)
             if png is None:
                 continue
             pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
@@ -725,7 +765,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 
 @st.cache_data(show_spinner="Building PDF report…")
 def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
-                     sort_mode, highlight, dates_items, show_medians,
+                     sort_mode, highlight, dates_items, median_group,
                      app_version=APP_VERSION):
     """Cached wrapper so the PDF only rebuilds when the data, selection,
     sort order, or highlight changes."""
@@ -741,7 +781,7 @@ def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
                          columns=raw_v.columns).astype("float64")
 
     return build_pdf_report(raw_v, num_v, formats, source_label,
-                            sort_mode, highlight, dates_items, show_medians)
+                            sort_mode, highlight, dates_items, median_group)
 
 
 st.set_page_config(
@@ -854,12 +894,15 @@ with st.sidebar:
         index=0,
     )
 
-    show_medians = st.checkbox(
-        "Show industry medians",
-        value=True,
-        help="Dashed reference lines on the CET1 and LCR charts "
-             "(Canadian banks + ML, Citigroup, BNP Paribas).",
+    median_group = st.radio(
+        "Industry median",
+        ["Off"] + list(INDUSTRY_MEDIAN_GROUPS.keys()),
+        index=0,
+        help="Overlay one benchmark group's median as a reference line on "
+             "the CET1 and LCR charts.",
     )
+    if median_group == "Off":
+        median_group = None
 
 
 if not sel_banks or not sel_metrics:
@@ -905,7 +948,7 @@ with st.sidebar:
             highlight,
             tuple((b, str(report_dates[b])) for b in sel_banks)
             if report_dates is not None else (),
-            show_medians,
+            median_group,
             APP_VERSION,
         )
 
@@ -1094,15 +1137,20 @@ def _metric_bar_fig(metric, fmt):
         )
     )
 
-    if show_medians:
-        positions = ["top left", "top right", "bottom right"]
-        for i, (label, value) in enumerate(industry_medians_for(metric)):
-            clr = MEDIAN_LINE_COLORS[i % len(MEDIAN_LINE_COLORS)]
+    if median_group:
+        median = industry_median_for_group(metric, median_group)
+        if median:
+            label, value = median
+            clr = MEDIAN_GROUP_COLORS.get(median_group, "#5b6770")
             fig.add_hline(
-                y=value, line_dash="dash", line_color=clr, line_width=1,
-                annotation_text=label,
-                annotation_position=positions[i % len(positions)],
-                annotation_font=dict(size=10, color=clr),
+                y=value, line_dash="dash", line_color=clr, line_width=2,
+                annotation_text=f"<b>{label}</b>",
+                annotation_position="top left",
+                annotation_bgcolor="white",
+                annotation_bordercolor=clr,
+                annotation_borderwidth=1,
+                annotation_borderpad=4,
+                annotation_font=dict(size=12, color=clr),
             )
 
     fig.update_layout(
