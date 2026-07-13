@@ -14,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v17 — 2026-07-13"
+APP_VERSION = "v18 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -258,6 +258,61 @@ def display_metric_name(metric):
     s = s.replace("%(", "(")
     s = s.replace("(%)", "")
     return " ".join(s.split())
+
+
+YEAR_COLORS = {
+    "2024": "#8a9aa5",
+    "2025": ACCENT,
+}
+
+
+def metric_year(metric):
+    """Return a trailing reporting year such as '2024' or '2025'."""
+    import re
+    match = re.search(r"\((20\d{2})\)\s*$", clean_metric_name(metric))
+    return match.group(1) if match else None
+
+
+def metric_base_name(metric):
+    """Remove a trailing year from a metric for combined-year chart titles."""
+    import re
+    name = clean_metric_name(metric)
+    name = re.sub(r"\s*\((20\d{2})\)\s*$", "", name)
+    return " ".join(name.split())
+
+
+def build_chart_groups(metrics, year_mode):
+    """Build one chart definition per metric.
+
+    Annual rows such as Revenue (2024) and Revenue (2025) are combined when
+    year_mode is 'Both'. Rows without a year, including YoY and market
+    indicators, remain individual charts.
+    """
+    groups = []
+    annual_positions = {}
+
+    for metric in metrics:
+        year = metric_year(metric)
+        if year:
+            if year_mode != "Both" and year != year_mode:
+                continue
+
+            base = metric_base_name(metric)
+            if base not in annual_positions:
+                annual_positions[base] = len(groups)
+                groups.append({"title": base, "metrics": {}})
+            groups[annual_positions[base]]["metrics"][year] = metric
+        else:
+            groups.append({
+                "title": display_metric_name(metric),
+                "metrics": {"": metric},
+            })
+
+    # Put 2024 before 2025 in legends and grouped bars.
+    for group in groups:
+        group["metrics"] = dict(sorted(group["metrics"].items()))
+
+    return [g for g in groups if g["metrics"]]
 
 
 def display_labels(metrics):
@@ -882,6 +937,18 @@ with st.sidebar:
 
     st.divider()
 
+    year_mode = st.radio(
+        "Years shown in graphs",
+        ["2025", "2024", "Both"],
+        index=0,
+        horizontal=True,
+        help=(
+            "Choose a single fiscal year or compare FY2024 and FY2025 "
+            "side by side. Metrics without a year, such as YoY and market "
+            "indicators, remain visible in every option."
+        ),
+    )
+
     sort_mode = st.radio(
         "Bank order in charts",
         ["By value", "By region, then value", "File order"],
@@ -1068,77 +1135,120 @@ with tab_heat:
     st.plotly_chart(heat, use_container_width=True)
 
 
-def _metric_bar_fig(metric, fmt):
-    row_position = list(num_v.index).index(metric)
-    series = num_v.iloc[row_position].dropna()
-    series = series.drop(index=[b for b in chart_excluded_banks(metric)
-                                if b in series.index])
+def _metric_bar_fig(chart_group):
+    """Create a single-year or grouped FY2024/FY2025 Plotly chart."""
+    metric_map = chart_group["metrics"]
+    title = chart_group["title"]
+    metric_items = list(metric_map.items())
 
-    if series.empty:
+    if not metric_items:
         return None
 
-    frame = series.reset_index()
-    frame.columns = ["Bank", "Value"]
-    frame["Region"] = [bank_region(b) for b in frame["Bank"]]
+    first_metric = metric_items[0][1]
+    fmt = formats[first_metric]
+
+    # Use all banks that have at least one value in the selected year(s).
+    available = []
+    for bank in num_v.columns:
+        if any(pd.notna(num_v.loc[m, bank]) for _, m in metric_items):
+            available.append(bank)
+
+    # Apply metric/bank exclusions. This mainly affects the LBC Net Income YoY row.
+    available = [
+        bank for bank in available
+        if not all(bank in chart_excluded_banks(m) for _, m in metric_items)
+    ]
+
+    if not available:
+        return None
+
+    # Sort using FY2025 when available, otherwise the latest selected year.
+    reference_label, reference_metric = metric_items[-1]
+    reference = num_v.loc[reference_metric, available]
 
     if sort_mode == "By value":
-        frame = frame.sort_values("Value", ascending=False)
+        order = reference.sort_values(ascending=False, na_position="last").index.tolist()
     elif sort_mode == "By region, then value":
-        frame = frame.sort_values(["Region", "Value"],
-                                  ascending=[True, False])
-    # "File order": keep as-is
-
-    if is_cds_metric(metric):
-        # Inverted: widening (positive) = red, tightening (negative) = green.
-        colors = [NEG if v > 0 else (POS if v < 0 else ACCENT)
-                  for v in frame["Value"]]
+        order = sorted(
+            available,
+            key=lambda b: (
+                bank_region(b),
+                -(reference.get(b) if pd.notna(reference.get(b)) else float("-inf")),
+            ),
+        )
     else:
-        colors = [NEG if v < 0 else ACCENT for v in frame["Value"]]
+        order = available
 
-    if highlight != "(none)":
-        colors = [
-            HILITE if b == highlight else c
-            for b, c in zip(frame["Bank"], colors)
-        ]
-
-    # Title: metric name, plus a small scale note for currency metrics.
-    subline_parts = []
+    # Title: base metric name, plus a small scale note for currency metrics.
+    title_text = display_metric_name(title)
     if fmt == "currency":
-        subline_parts.append("in $ millions (USD)")
-
-    title_text = display_metric_name(metric)
-    if subline_parts:
-        title_text += ("<br><sup style='color:#8a949c'>"
-                       + "  ·  ".join(subline_parts) + "</sup>")
+        title_text += "<br><sup style='color:#8a949c'>in $ millions (USD)</sup>"
 
     if fmt == "currency":
-        hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
-                     "<br>$%{y:,.0f}<extra></extra>")
         axfmt = "$,.0f"
     elif fmt == "percent":
-        hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
-                     "<br>%{y:.1f}%<extra></extra>")
         axfmt = ".1f"
     else:
-        hovertmpl = ("<b>%{customdata[0]}</b> · %{customdata[1]}"
-                     "<br>%{y:,.1f}<extra></extra>")
         axfmt = ",.1f"
 
-    fig = go.Figure(
-        go.Bar(
-            x=[short_name(b) for b in frame["Bank"]],
-            y=frame["Value"],
-            marker_color=colors,
-            text=[compact_label(v, fmt) for v in frame["Value"]],
-            textposition="outside",
-            customdata=list(zip(frame["Bank"], frame["Region"])),
-            hovertemplate=hovertmpl,
-            cliponaxis=False,
+    fig = go.Figure()
+    multiple_years = len(metric_items) > 1
+
+    for year_label, metric in metric_items:
+        values = num_v.loc[metric, order]
+        valid_mask = values.notna()
+        trace_banks = [b for b, ok in zip(order, valid_mask) if ok]
+        trace_values = [v for v in values if pd.notna(v)]
+
+        if not trace_banks:
+            continue
+
+        if multiple_years:
+            base_color = YEAR_COLORS.get(year_label, ACCENT)
+            colors = [base_color] * len(trace_values)
+        elif is_cds_metric(metric):
+            colors = [NEG if v > 0 else (POS if v < 0 else ACCENT)
+                      for v in trace_values]
+        else:
+            colors = [NEG if v < 0 else ACCENT for v in trace_values]
+
+        if highlight != "(none)":
+            colors = [
+                HILITE if bank == highlight else color
+                for bank, color in zip(trace_banks, colors)
+            ]
+
+        if fmt == "currency":
+            hover_value = "$%{y:,.0f}"
+        elif fmt == "percent":
+            hover_value = "%{y:.1f}%"
+        else:
+            hover_value = "%{y:,.1f}"
+
+        year_text = f" · FY{year_label}" if year_label else ""
+        hovertemplate = (
+            "<b>%{customdata[0]}</b> · %{customdata[1]}"
+            + year_text
+            + "<br>" + hover_value + "<extra></extra>"
         )
-    )
+
+        fig.add_trace(go.Bar(
+            name=f"FY{year_label}" if year_label else title,
+            x=[short_name(b) for b in trace_banks],
+            y=trace_values,
+            marker_color=colors,
+            text=[compact_label(v, fmt) for v in trace_values],
+            textposition="outside",
+            customdata=[(b, bank_region(b)) for b in trace_banks],
+            hovertemplate=hovertemplate,
+            cliponaxis=False,
+        ))
+
+    if not fig.data:
+        return None
 
     if median_group:
-        median = industry_median_for_group(metric, median_group)
+        median = industry_median_for_group(first_metric, median_group)
         if median:
             label, value = median
             clr = MEDIAN_GROUP_COLORS.get(median_group, "#5b6770")
@@ -1155,35 +1265,59 @@ def _metric_bar_fig(metric, fmt):
 
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=14)),
-        height=300,
-        margin=dict(l=10, r=10, t=48, b=10),
+        height=320,
+        margin=dict(l=10, r=10, t=58, b=10),
         yaxis=dict(tickformat=axfmt, title="", gridcolor=GRID_CLR,
                    zeroline=True, zerolinecolor=ZERO_CLR),
-        xaxis=dict(title=""),
+        xaxis=dict(title="", categoryorder="array",
+                   categoryarray=[short_name(b) for b in order]),
         plot_bgcolor="rgba(0,0,0,0)",
-        bargap=0.25,
-        showlegend=False,
+        bargap=0.22,
+        bargroupgap=0.08,
+        barmode="group",
+        showlegend=multiple_years,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1),
     )
 
     return fig
 
 
 with tab_charts:
-    topic_pages = [
-        (t, ms)
-        for t, ms in group_metrics_by_topic(sel_metrics, formats)
-        if ms
-    ]
+    chart_groups = build_chart_groups(sel_metrics, year_mode)
+
+    topic_groups = {
+        TOPIC_PERFORMANCE: [],
+        TOPIC_RISK: [],
+        TOPIC_MARKET: [],
+    }
+
+    for group in chart_groups:
+        representative = next(iter(group["metrics"].values()))
+        name = clean_metric_name(representative).lower()
+
+        if any(k in name for k in MARKET_KEYWORDS):
+            topic = TOPIC_MARKET
+        elif (formats.get(representative) == "currency"
+              or any(k in name for k in PERFORMANCE_KEYWORDS)):
+            topic = TOPIC_PERFORMANCE
+        else:
+            topic = TOPIC_RISK
+
+        topic_groups[topic].append(group)
+
+    topic_pages = [(topic, groups) for topic, groups in topic_groups.items()
+                   if groups]
 
     if not topic_pages:
-        st.info("No chartable metrics.")
+        st.info("No chartable metrics for the selected year option.")
     else:
         page_tabs = st.tabs([
-            f"{TOPIC_ICONS.get(t, '📊')} {t} ({len(ms)})"
-            for t, ms in topic_pages
+            f"{TOPIC_ICONS.get(topic, '📊')} {topic} ({len(groups)})"
+            for topic, groups in topic_pages
         ])
 
-        for page_tab, (topic, page_metrics) in zip(page_tabs, topic_pages):
+        for page_tab, (topic, page_groups) in zip(page_tabs, topic_pages):
             with page_tab:
                 if topic == TOPIC_MARKET:
                     with st.container(border=True):
@@ -1191,12 +1325,16 @@ with tab_charts:
                 else:
                     show_reporting_dates()
 
+                if year_mode == "Both":
+                    st.caption("FY2024 and FY2025 are displayed side by side.")
+                else:
+                    st.caption(f"Graphs display FY{year_mode} values.")
+
                 cols = st.columns(2)
                 shown = 0
 
-                for metric in page_metrics:
-                    fig = _metric_bar_fig(metric, formats[metric])
-
+                for group in page_groups:
+                    fig = _metric_bar_fig(group)
                     if fig is None:
                         continue
 
