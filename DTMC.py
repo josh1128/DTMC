@@ -14,13 +14,15 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v19 — 2026-07-13"
+APP_VERSION = "v21 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
 METRIC_COL = "In MM (USD)"
 
 SCALE_NOTE = "Revenue and Net Income are in USD millions ($MM)."
+
+DATA_SOURCE_NOTE = "Source: S&P Capital IQ"
 
 CONSOLIDATED_NOTE = (
     "Merrill Lynch and Citibank NA reflect the consolidated financials of "
@@ -688,12 +690,8 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight, median_group):
             FuncFormatter(lambda v, _: f"{v:,.1f}"))
         fmt_key = "number"
 
-    # Stagger labels on two levels so close-valued neighbours never overlap.
-    labels = [compact_label(v, fmt_key) for v in values]
-    for parity, pad in ((0, 2), (1, 12)):
-        level = [lbl if i % 2 == parity else ""
-                 for i, lbl in enumerate(labels)]
-        ax.bar_label(bars, labels=level, fontsize=6, padding=pad)
+    # On-bar numeric labels are intentionally omitted to keep the chart
+    # legible with many banks; exact values are available in the table.
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
@@ -739,10 +737,6 @@ def _family_png_multi(family_base, entries, num_v, fmt, sort_mode,
             color=year_color(year, years),
             label=str(year) if year is not None else display_metric_name(metric),
         )
-        labels = [compact_label(v, fmt) if not math.isnan(v) else ""
-                  for v in values]
-        ax.bar_label(bars, labels=labels, fontsize=5.5, padding=2)
-
         if highlight != "(none)" and highlight in banks:
             bars[banks.index(highlight)].set_edgecolor(HILITE)
             bars[banks.index(highlight)].set_linewidth(1.6)
@@ -894,18 +888,18 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         Paragraph(CONSOLIDATED_NOTE, subtitle),
     ]
 
-    # Industry median reference note.
-    lines = []
-    for group_name, group_data in INDUSTRY_MEDIAN_GROUPS.items():
-        parts = []
-        for key, value in group_data.items():
-            display_metric = "CET 1 ratio" if key == "cet 1" else key.upper()
-            parts.append(f"{display_metric} {value:g}%")
-        lines.append(f"<b>{group_name}</b> — " + ", ".join(parts))
-    story.append(Paragraph(
-        "Industry medians: " + " &nbsp;·&nbsp; ".join(lines), subtitle))
-
     # --- Charts grouped by topic: each topic starts on its own page.
+
+    # Reusable Industry medians line (shown on the Financial Performance page).
+    _median_lines = []
+    for _group_name, _group_data in INDUSTRY_MEDIAN_GROUPS.items():
+        _parts = []
+        for _key, _value in _group_data.items():
+            _dm = "CET 1 ratio" if _key == "cet 1" else _key.upper()
+            _parts.append(f"{_dm} {_value:g}%")
+        _median_lines.append(f"<b>{_group_name}</b> — " + ", ".join(_parts))
+    _industry_medians_note = ("Industry medians: "
+                              + " &nbsp;·&nbsp; ".join(_median_lines))
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
 
@@ -922,6 +916,8 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
             for line in date_caption_lines(
                     pd.Series(dates) if dates else None, banks):
                 story.append(Paragraph(line, subtitle))
+            if topic == TOPIC_PERFORMANCE:
+                story.append(Paragraph(_industry_medians_note, subtitle))
         story.append(Spacer(1, 4))
 
         pair = []
@@ -955,6 +951,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         canvas.drawRightString(page_w - margin, 0.3 * inch, f"Page {doc.page}")
         canvas.drawString(margin, 0.3 * inch,
                           f"{REPORT_TITLE} — Revenue & Net Income in MM (USD)")
+        canvas.drawCentredString(page_w / 2, 0.3 * inch, DATA_SOURCE_NOTE)
         canvas.restoreState()
 
     buf = io.BytesIO()
@@ -1131,6 +1128,10 @@ def show_reporting_dates():
         with st.container(border=True):
             st.markdown(as_of_md)
 
+
+def show_source_note():
+    st.caption(DATA_SOURCE_NOTE)
+
 with st.sidebar:
     st.divider()
     st.header("Report")
@@ -1226,6 +1227,7 @@ with tab_table:
     )
 
     st.caption(f"{SCALE_NOTE} {CONSOLIDATED_NOTE}")
+    show_source_note()
 
 
 with tab_heat:
@@ -1269,6 +1271,7 @@ with tab_heat:
     )
 
     st.plotly_chart(heat, use_container_width=True)
+    show_source_note()
 
 
 def _metric_bar_fig(metric, fmt):
@@ -1332,8 +1335,6 @@ def _metric_bar_fig(metric, fmt):
             x=[short_name(b) for b in frame["Bank"]],
             y=frame["Value"],
             marker_color=colors,
-            text=[compact_label(v, fmt) for v in frame["Value"]],
-            textposition="outside",
             customdata=list(zip(frame["Bank"], frame["Region"])),
             hovertemplate=hovertmpl,
             cliponaxis=False,
@@ -1387,19 +1388,14 @@ def _family_bar_fig_multi(family_base, entries, fmt):
         excluded = set(chart_excluded_banks(metric))
         series = num_v.loc[metric]
 
-        y_vals, text_vals, text_colors, line_widths = [], [], [], []
+        y_vals, line_widths = [], []
         for b in banks:
             if (b in excluded or b not in series.index
                     or pd.isna(series[b])):
                 y_vals.append(None)
-                text_vals.append("")
-                text_colors.append("#333333")
                 line_widths.append(0)
                 continue
-            v = series[b]
-            y_vals.append(v)
-            text_vals.append(compact_label(v, fmt))
-            text_colors.append(NEG if v < 0 else "#333333")
+            y_vals.append(series[b])
             line_widths.append(3 if b == highlight else 0)
 
         fig.add_trace(go.Bar(
@@ -1410,9 +1406,6 @@ def _family_bar_fig_multi(family_base, entries, fmt):
                 color=year_color(year, years),
                 line=dict(color=HILITE, width=line_widths),
             ),
-            text=text_vals,
-            textposition="outside",
-            textfont=dict(color=text_colors),
             customdata=[[b, bank_region(b)] for b in banks],
             hovertemplate=("<b>%{customdata[0]}</b> · %{customdata[1]}"
                            "<br>%{y}<extra></extra>"),
@@ -1515,6 +1508,8 @@ with tab_charts:
 
                 if shown == 0:
                     st.info("No numeric values to chart for this topic.")
+
+                show_source_note()
 
 
 st.divider()
