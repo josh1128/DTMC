@@ -14,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v14 — 2026-07-13"
+APP_VERSION = "v15 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -143,19 +143,9 @@ TOPIC_ICONS = {
 
 # CDS charts invert the color logic: a POSITIVE change (spread widening) is
 # BAD news for credit perception, a NEGATIVE change (tightening) is good.
-CDS_NOTE = (
-    "CDS spreads: widening (red) signals rising perceived credit risk; "
-    "tightening (green) signals improvement."
-)
-
 MARKET_NOTE = (
     "Market indicators are as of June 2026 — the ▲ 3 months change is "
     "measured vs. March 2026, and the ▲ 1 year change vs. June 2025."
-)
-
-LBC_NI_YOY_NOTE = (
-    "Note: LBC YoY change is not included because its previous year's value "
-    "was negative, so it is not economically meaningful."
 )
 
 # (internal metric name, bank) pairs excluded from charts and the heatmap.
@@ -651,14 +641,10 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 
         if topic == TOPIC_MARKET:
             story.append(Paragraph(MARKET_NOTE, subtitle))
-            story.append(Paragraph(CDS_NOTE, subtitle))
         else:
             for line in date_caption_lines(
                     pd.Series(dates) if dates else None, banks):
                 story.append(Paragraph(line, subtitle))
-            if topic == TOPIC_PERFORMANCE and "LBC" in banks and any(
-                    m in metrics for (m, _) in CHART_EXCLUSIONS):
-                story.append(Paragraph(LBC_NI_YOY_NOTE, subtitle))
         story.append(Spacer(1, 4))
 
         pair = []
@@ -1100,14 +1086,9 @@ with tab_charts:
             with page_tab:
                 if topic == TOPIC_MARKET:
                     with st.container(border=True):
-                        st.markdown(f"{MARKET_NOTE}  \n{CDS_NOTE}")
+                        st.markdown(MARKET_NOTE)
                 else:
                     show_reporting_dates()
-                    if (topic == TOPIC_PERFORMANCE
-                            and "LBC" in sel_banks
-                            and any(m in page_metrics
-                                    for (m, _) in CHART_EXCLUSIONS)):
-                        st.caption(LBC_NI_YOY_NOTE)
 
                 cols = st.columns(2)
                 shown = 0
