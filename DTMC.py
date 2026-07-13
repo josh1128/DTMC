@@ -14,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v20 — 2026-07-13"
+APP_VERSION = "v21 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2024 and FY 2025"
 
@@ -632,8 +632,16 @@ def _metric_png(chart_group, num_v, formats, sort_mode, highlight):
         ax.bar_label(bars, labels=labels, fontsize=5.5, padding=2)
 
     if any(bool(year_label) for year_label, _ in metric_items):
-        ax.legend(fontsize=7, frameon=False, ncol=min(2, len(metric_items)),
-                  loc="upper right")
+        # Keep FY2024 and FY2025 in one grouped chart and place the
+        # year-colour legend below the x-axis.
+        ax.legend(
+            fontsize=7,
+            frameon=False,
+            ncol=min(2, len(metric_items)),
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.28),
+        )
+        fig.subplots_adjust(bottom=0.30)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
@@ -1240,7 +1248,7 @@ def _metric_bar_fig(chart_group):
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=14)),
         height=320,
-        margin=dict(l=10, r=10, t=58, b=10),
+        margin=dict(l=10, r=10, t=58, b=72),
         yaxis=dict(tickformat=axfmt, title="", gridcolor=GRID_CLR,
                    zeroline=True, zerolinecolor=ZERO_CLR),
         xaxis=dict(title="", categoryorder="array",
@@ -1250,8 +1258,16 @@ def _metric_bar_fig(chart_group):
         bargroupgap=0.08,
         barmode="group",
         showlegend=has_year_series,
-        legend=dict(orientation="h", yanchor="bottom", y=1.01,
-                    xanchor="right", x=1),
+        # FY2024 and FY2025 remain separate traces in the same grouped
+        # chart. The legend at the bottom identifies their colours.
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.20,
+            xanchor="center",
+            x=0.5,
+            title_text="",
+        ),
     )
 
     return fig
@@ -1301,11 +1317,15 @@ with tab_charts:
 
                 selected_label = " and ".join(f"FY{y}" for y in selected_years)
                 if len(selected_years) > 1:
-                    st.caption(f"{selected_label} are displayed side by side. "
-                               "The legend identifies each year by colour.")
+                    st.caption(
+                        f"{selected_label} are displayed as grouped bars in the same graph. "
+                        "The legend below the graph identifies each year by colour."
+                    )
                 else:
-                    st.caption(f"{selected_label} is displayed. "
-                               "The legend identifies the selected year by colour.")
+                    st.caption(
+                        f"{selected_label} is displayed. "
+                        "The legend below the graph identifies the selected year by colour."
+                    )
 
                 cols = st.columns(2)
                 shown = 0
