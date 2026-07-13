@@ -14,9 +14,9 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v18 — 2026-07-13"
+APP_VERSION = "v20 — 2026-07-13"
 
-REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
+REPORT_TITLE = "Financial Performance of RG Participants - FY 2024 and FY 2025"
 
 METRIC_COL = "In MM (USD)"
 
@@ -157,56 +157,6 @@ def chart_excluded_banks(metric):
     return [b for (m, b) in CHART_EXCLUSIONS if m == metric]
 
 
-# Industry-median benchmarks. Each group lists the metrics it covers
-# (matched case-insensitively against metric names) and the reference value
-# for each. Add a group here to make it appear in the sidebar selector.
-INDUSTRY_MEDIAN_GROUPS = {
-    "Canadian banks + Merrill Lynch": {
-        "cet 1": 12.9,
-        "lcr": 127.0,
-    },
-    "Citigroup": {
-        "cet 1": 15.0,
-    },
-    "BNP Paribas": {
-        "cet 1": 17.4,
-        "lcr": 181.0,
-    },
-}
-
-# Colors used for the reference line, keyed to group name.
-MEDIAN_GROUP_COLORS = {
-    "Canadian banks + Merrill Lynch": "#c0392b",  # red
-    "Citigroup":                      "#8a6d3b",  # brown
-    "BNP Paribas":                    "#6b4b8a",  # purple
-}
-
-
-def _median_key_for(metric):
-    """Return the config key inside a benchmark group that matches this
-    metric's name, or None."""
-    name = clean_metric_name(metric).lower()
-    for group_data in INDUSTRY_MEDIAN_GROUPS.values():
-        for key in group_data:
-            if key in name:
-                return key
-    return None
-
-
-def industry_median_for_group(metric, group):
-    """Return (label, value) for `group`'s benchmark on this metric, or None."""
-    if group not in INDUSTRY_MEDIAN_GROUPS:
-        return None
-    key = _median_key_for(metric)
-    if key is None:
-        return None
-    value = INDUSTRY_MEDIAN_GROUPS[group].get(key)
-    if value is None:
-        return None
-    display = f"{value:g}%" if key in ("cet 1", "lcr") else f"{value:g}"
-    return (f"Industry median — {group}: {display}", value)
-
-
 ACCENT = "#1f6f8b"   # neutral bars
 NEG = "#c0392b"      # negative values only (positive for CDS widening)
 POS = "#2a9d4a"      # CDS tightening only
@@ -281,39 +231,44 @@ def metric_base_name(metric):
     return " ".join(name.split())
 
 
-def build_chart_groups(metrics, year_mode):
+def build_chart_groups(metrics, selected_years=("2024", "2025")):
     """Build one chart definition per metric.
 
-    Annual rows such as Revenue (2024) and Revenue (2025) are combined when
-    year_mode is 'Both'. Rows without a year, including YoY and market
-    indicators, remain individual charts.
+    Annual rows such as Revenue (2024) and Revenue (2025) are combined into
+    one grouped chart, but only for the years selected by the user. Rows
+    without a year, including YoY and market indicators, remain individual
+    charts.
     """
     groups = []
     annual_positions = {}
 
     for metric in metrics:
         year = metric_year(metric)
-        if year:
-            if year_mode != "Both" and year != year_mode:
+        if year in {"2024", "2025"}:
+            if year not in set(selected_years):
                 continue
-
             base = metric_base_name(metric)
             if base not in annual_positions:
                 annual_positions[base] = len(groups)
                 groups.append({"title": base, "metrics": {}})
             groups[annual_positions[base]]["metrics"][year] = metric
+        elif year:
+            # Keep other dated rows separate rather than mixing them into the
+            # FY2024/FY2025 comparison.
+            groups.append({
+                "title": display_metric_name(metric),
+                "metrics": {year: metric},
+            })
         else:
             groups.append({
                 "title": display_metric_name(metric),
                 "metrics": {"": metric},
             })
 
-    # Put 2024 before 2025 in legends and grouped bars.
     for group in groups:
         group["metrics"] = dict(sorted(group["metrics"].items()))
 
     return [g for g in groups if g["metrics"]]
-
 
 def display_labels(metrics):
     """Cleaned metric names made unique again for pandas (Styler requires a
@@ -563,99 +518,130 @@ def build_numeric(raw):
 # --------------------------------------------------------------------------- #
 # PDF report (reportlab for layout, matplotlib for static charts)
 # --------------------------------------------------------------------------- #
-def _metric_png(metric, num_v, fmt, sort_mode, highlight, median_group):
-    """Render one metric's bar chart to PNG bytes with matplotlib (Agg),
-    mirroring the on-screen chart: same colors, ordering, and highlight."""
+def _metric_png(chart_group, num_v, formats, sort_mode, highlight):
+    """Render one grouped FY2024/FY2025 chart to PNG bytes."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
+    import numpy as np
 
-    series = num_v.loc[metric].dropna()
-    series = series.drop(index=[b for b in chart_excluded_banks(metric)
-                                if b in series.index])
-
-    if series.empty:
+    metric_items = list(chart_group["metrics"].items())
+    if not metric_items:
         return None
 
+    first_metric = metric_items[0][1]
+    fmt = formats[first_metric]
+
+    available = []
+    for bank in num_v.columns:
+        if any(pd.notna(num_v.loc[m, bank]) for _, m in metric_items):
+            available.append(bank)
+
+    available = [
+        bank for bank in available
+        if not all(bank in chart_excluded_banks(m) for _, m in metric_items)
+    ]
+    if not available:
+        return None
+
+    _, reference_metric = metric_items[-1]
+    reference = num_v.loc[reference_metric, available]
+
     if sort_mode == "By value":
-        series = series.sort_values(ascending=False)
+        order = reference.sort_values(
+            ascending=False, na_position="last"
+        ).index.tolist()
     elif sort_mode == "By region, then value":
-        order = sorted(series.index,
-                       key=lambda b: (bank_region(b), -series[b]))
-        series = series.loc[order]
-
-    banks = list(series.index)
-    values = series.values
-
-    if is_cds_metric(metric):
-        # Inverted: widening (positive) = red, tightening (negative) = green.
-        bar_colors = [NEG if v > 0 else (POS if v < 0 else ACCENT)
-                      for v in values]
+        order = sorted(
+            available,
+            key=lambda b: (
+                bank_region(b),
+                -(reference.get(b) if pd.notna(reference.get(b))
+                  else float("-inf")),
+            ),
+        )
     else:
-        bar_colors = [NEG if v < 0 else ACCENT for v in values]
-
-    if highlight != "(none)":
-        bar_colors = [
-            HILITE if b == highlight else c
-            for b, c in zip(banks, bar_colors)
-        ]
+        order = available
 
     fig, ax = plt.subplots(figsize=(6.4, 3.4), dpi=150)
-    bars = ax.bar([short_name(b) for b in banks], values, color=bar_colors)
+    x = np.arange(len(order))
+    multiple_years = len(metric_items) > 1
+    width = 0.36 if multiple_years else 0.62
+
+    all_bars = []
+    for i, (year_label, metric) in enumerate(metric_items):
+        values = num_v.loc[metric, order]
+        numeric_values = [float(v) if pd.notna(v) else np.nan for v in values]
+
+        if multiple_years:
+            offsets = (i - (len(metric_items) - 1) / 2) * width
+            positions = x + offsets
+            colors = [YEAR_COLORS.get(year_label, ACCENT)] * len(order)
+        else:
+            positions = x
+            if is_cds_metric(metric):
+                colors = [
+                    NEG if pd.notna(v) and v > 0 else
+                    POS if pd.notna(v) and v < 0 else ACCENT
+                    for v in numeric_values
+                ]
+            else:
+                colors = [
+                    NEG if pd.notna(v) and v < 0 else ACCENT
+                    for v in numeric_values
+                ]
+
+        if highlight != "(none)":
+            colors = [
+                HILITE if bank == highlight else color
+                for bank, color in zip(order, colors)
+            ]
+
+        bars = ax.bar(
+            positions,
+            numeric_values,
+            width=width,
+            color=colors,
+            label=f"FY{year_label}" if year_label else chart_group["title"],
+        )
+        all_bars.append((bars, numeric_values))
+
     ax.grid(axis="y", color=GRID_CLR, linewidth=0.6)
     ax.set_axisbelow(True)
-    ax.margins(y=0.18)  # headroom for the staggered labels
-
-    if median_group:
-        median = industry_median_for_group(metric, median_group)
-        if median:
-            label, value = median
-            clr = MEDIAN_GROUP_COLORS.get(median_group, "#5b6770")
-            ax.axhline(value, color=clr, linewidth=1.4, linestyle="--")
-            ax.annotate(label, xy=(0.5, value),
-                        xycoords=("axes fraction", "data"),
-                        fontsize=7, color=clr, ha="center", va="bottom",
-                        fontweight="bold",
-                        bbox=dict(boxstyle="round,pad=0.2",
-                                  fc="white", ec=clr, lw=0.6))
-
-    ax.set_title(display_metric_name(metric), fontsize=10, fontweight="bold")
+    ax.margins(y=0.20)
+    ax.set_title(display_metric_name(chart_group["title"]),
+                 fontsize=10, fontweight="bold")
     ax.axhline(0, color="#888888", linewidth=0.6)
     ax.spines[["top", "right"]].set_visible(False)
-    ax.tick_params(axis="x", labelrotation=45, labelsize=7)
-    for lbl in ax.get_xticklabels():
-        lbl.set_ha("right")
+    ax.set_xticks(x)
+    ax.set_xticklabels([short_name(b) for b in order], rotation=45,
+                       ha="right", fontsize=7)
     ax.tick_params(axis="y", labelsize=7)
 
     if fmt == "currency":
         ax.set_ylabel("US$ MM", fontsize=7, color="#666666")
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:,.0f}"))
-        fmt_key = "currency"
     elif fmt == "percent":
-        ax.yaxis.set_major_formatter(
-            FuncFormatter(lambda v, _: f"{v:,.1f}%"))
-        fmt_key = "percent"
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.1f}%"))
     else:
-        ax.yaxis.set_major_formatter(
-            FuncFormatter(lambda v, _: f"{v:,.1f}"))
-        fmt_key = "number"
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.1f}"))
 
-    # Stagger labels on two levels so close-valued neighbours never overlap.
-    labels = [compact_label(v, fmt_key) for v in values]
-    for parity, pad in ((0, 2), (1, 12)):
-        level = [lbl if i % 2 == parity else ""
-                 for i, lbl in enumerate(labels)]
-        ax.bar_label(bars, labels=level, fontsize=6, padding=pad)
+    for bars, vals in all_bars:
+        labels = [compact_label(v, fmt) if pd.notna(v) else "" for v in vals]
+        ax.bar_label(bars, labels=labels, fontsize=5.5, padding=2)
+
+    if any(bool(year_label) for year_label, _ in metric_items):
+        ax.legend(fontsize=7, frameon=False, ncol=min(2, len(metric_items)),
+                  loc="upper right")
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
     plt.close(fig)
     return buf.getvalue()
 
-
 def build_pdf_report(raw_v, num_v, formats, source_label,
-                     sort_mode, highlight, dates_items, median_group):
+                     sort_mode, highlight, dates_items, selected_years):
     """Assemble a landscape PDF: title + comparison table (with 'Region' and
     'As of' columns) on page 1, then charts grouped by topic -- each topic
     starts on its own landscape page."""
@@ -746,27 +732,34 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         Paragraph(CONSOLIDATED_NOTE, subtitle),
     ]
 
-    # Industry median reference note.
-    lines = []
-    for group_name, group_data in INDUSTRY_MEDIAN_GROUPS.items():
-        parts = []
-        for key, value in group_data.items():
-            display_metric = "CET 1 ratio" if key == "cet 1" else key.upper()
-            parts.append(f"{display_metric} {value:g}%")
-        lines.append(f"<b>{group_name}</b> — " + ", ".join(parts))
-    story.append(Paragraph(
-        "Industry medians: " + " &nbsp;·&nbsp; ".join(lines), subtitle))
-
     # --- Charts grouped by topic: each topic starts on its own page.
     img_w = (avail_w - 0.2 * inch) / 2
-    img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
+    img_h = img_w * 0.54
 
-    for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
-        if not topic_metrics:
+    chart_groups = build_chart_groups(metrics, selected_years)
+    topic_groups = {
+        TOPIC_PERFORMANCE: [],
+        TOPIC_RISK: [],
+        TOPIC_MARKET: [],
+    }
+
+    for group in chart_groups:
+        representative = next(iter(group["metrics"].values()))
+        name = clean_metric_name(representative).lower()
+        if any(k in name for k in MARKET_KEYWORDS):
+            topic = TOPIC_MARKET
+        elif (formats.get(representative) == "currency"
+              or any(k in name for k in PERFORMANCE_KEYWORDS)):
+            topic = TOPIC_PERFORMANCE
+        else:
+            topic = TOPIC_RISK
+        topic_groups[topic].append(group)
+
+    for topic, page_groups in topic_groups.items():
+        if not page_groups:
             continue
 
-        story += [PageBreak(),
-                  Paragraph(topic, styles["Heading2"])]
+        story += [PageBreak(), Paragraph(topic, styles["Heading2"])]
 
         if topic == TOPIC_MARKET:
             story.append(Paragraph(MARKET_NOTE, subtitle))
@@ -774,13 +767,18 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
             for line in date_caption_lines(
                     pd.Series(dates) if dates else None, banks):
                 story.append(Paragraph(line, subtitle))
+            year_text = " and ".join(f"FY{y}" for y in selected_years)
+            if len(selected_years) > 1:
+                year_text += " are displayed side by side."
+            else:
+                year_text += " is displayed."
+            story.append(Paragraph(year_text, subtitle))
         story.append(Spacer(1, 4))
 
         pair = []
         chart_rows = []
-        for metric in topic_metrics:
-            png = _metric_png(metric, num_v, formats[metric],
-                              sort_mode, highlight, median_group)
+        for group in page_groups:
+            png = _metric_png(group, num_v, formats, sort_mode, highlight)
             if png is None:
                 continue
             pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
@@ -820,7 +818,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 
 @st.cache_data(show_spinner="Building PDF report…")
 def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
-                     sort_mode, highlight, dates_items, median_group,
+                     sort_mode, highlight, dates_items, selected_years,
                      app_version=APP_VERSION):
     """Cached wrapper so the PDF only rebuilds when the data, selection,
     sort order, or highlight changes."""
@@ -836,7 +834,7 @@ def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
                          columns=raw_v.columns).astype("float64")
 
     return build_pdf_report(raw_v, num_v, formats, source_label,
-                            sort_mode, highlight, dates_items, median_group)
+                            sort_mode, highlight, dates_items, selected_years)
 
 
 st.set_page_config(
@@ -935,19 +933,14 @@ with st.sidebar:
         default=all_metrics,
     )
 
-    st.divider()
-
-    year_mode = st.radio(
+    selected_years = st.multiselect(
         "Years shown in graphs",
-        ["2025", "2024", "Both"],
-        index=0,
-        horizontal=True,
-        help=(
-            "Choose a single fiscal year or compare FY2024 and FY2025 "
-            "side by side. Metrics without a year, such as YoY and market "
-            "indicators, remain visible in every option."
-        ),
+        ["2024", "2025"],
+        default=["2024", "2025"],
+        help="Select one year to show it alone, or select both years to compare them side by side.",
     )
+
+    st.divider()
 
     sort_mode = st.radio(
         "Bank order in charts",
@@ -961,19 +954,14 @@ with st.sidebar:
         index=0,
     )
 
-    median_group = st.radio(
-        "Industry median",
-        ["Off"] + list(INDUSTRY_MEDIAN_GROUPS.keys()),
-        index=0,
-        help="Overlay one benchmark group's median as a reference line on "
-             "the CET1 and LCR charts.",
-    )
-    if median_group == "Off":
-        median_group = None
 
 
 if not sel_banks or not sel_metrics:
     st.info("Pick at least one bank and one metric.")
+    st.stop()
+
+if not selected_years:
+    st.info("Select at least one graph year: 2024 or 2025.")
     st.stop()
 
 
@@ -1015,7 +1003,7 @@ with st.sidebar:
             highlight,
             tuple((b, str(report_dates[b])) for b in sel_banks)
             if report_dates is not None else (),
-            median_group,
+            tuple(selected_years),
             APP_VERSION,
         )
 
@@ -1193,6 +1181,7 @@ def _metric_bar_fig(chart_group):
 
     fig = go.Figure()
     multiple_years = len(metric_items) > 1
+    has_year_series = any(bool(year_label) for year_label, _ in metric_items)
 
     for year_label, metric in metric_items:
         values = num_v.loc[metric, order]
@@ -1247,21 +1236,6 @@ def _metric_bar_fig(chart_group):
     if not fig.data:
         return None
 
-    if median_group:
-        median = industry_median_for_group(first_metric, median_group)
-        if median:
-            label, value = median
-            clr = MEDIAN_GROUP_COLORS.get(median_group, "#5b6770")
-            fig.add_hline(
-                y=value, line_dash="dash", line_color=clr, line_width=2,
-                annotation_text=f"<b>{label}</b>",
-                annotation_position="top left",
-                annotation_bgcolor="white",
-                annotation_bordercolor=clr,
-                annotation_borderwidth=1,
-                annotation_borderpad=4,
-                annotation_font=dict(size=12, color=clr),
-            )
 
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=14)),
@@ -1275,7 +1249,7 @@ def _metric_bar_fig(chart_group):
         bargap=0.22,
         bargroupgap=0.08,
         barmode="group",
-        showlegend=multiple_years,
+        showlegend=has_year_series,
         legend=dict(orientation="h", yanchor="bottom", y=1.01,
                     xanchor="right", x=1),
     )
@@ -1284,7 +1258,7 @@ def _metric_bar_fig(chart_group):
 
 
 with tab_charts:
-    chart_groups = build_chart_groups(sel_metrics, year_mode)
+    chart_groups = build_chart_groups(sel_metrics, selected_years)
 
     topic_groups = {
         TOPIC_PERFORMANCE: [],
@@ -1310,7 +1284,7 @@ with tab_charts:
                    if groups]
 
     if not topic_pages:
-        st.info("No chartable metrics for the selected year option.")
+        st.info("No chartable metrics.")
     else:
         page_tabs = st.tabs([
             f"{TOPIC_ICONS.get(topic, '📊')} {topic} ({len(groups)})"
@@ -1325,10 +1299,13 @@ with tab_charts:
                 else:
                     show_reporting_dates()
 
-                if year_mode == "Both":
-                    st.caption("FY2024 and FY2025 are displayed side by side.")
+                selected_label = " and ".join(f"FY{y}" for y in selected_years)
+                if len(selected_years) > 1:
+                    st.caption(f"{selected_label} are displayed side by side. "
+                               "The legend identifies each year by colour.")
                 else:
-                    st.caption(f"Graphs display FY{year_mode} values.")
+                    st.caption(f"{selected_label} is displayed. "
+                               "The legend identifies the selected year by colour.")
 
                 cols = st.columns(2)
                 shown = 0
