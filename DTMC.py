@@ -14,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v18 — 2026-07-13"
+APP_VERSION = "v19 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -215,9 +215,9 @@ GRID_CLR = "#eef2f4"
 ZERO_CLR = "#c9d2d8"
 STRIPE_BG = "#f8fbfc"
 
-# Palette used to color each year's bars when a metric has more than one
-# year on the same chart (e.g. Revenue (2025) + Revenue (2024)). The most
-# recent year always gets the first color.
+# Palette used to color each year's bars in a multi-year chart. The most
+# recent year always gets the first (dark teal) color; older years step
+# through the palette below.
 YEAR_PALETTE = ["#1f6f8b", "#c98a3e", "#8a6fae", "#5b8c5a", "#c0392b"]
 
 
@@ -287,10 +287,9 @@ def parse_year_suffix(metric):
 def group_into_families(metrics):
     """Group metric rows that share a base name (ignoring the year suffix)
     into "families" — e.g. 'Revenue (2025)' and 'Revenue (2024)' become one
-    family with two (year, metric) entries, ready to render as a single
-    grouped bar chart. Metrics without a year suffix become a family of one.
-    Returns a list of (family_base_name, [(year, metric), ...]) in the order
-    families first appear."""
+    family with two (year, metric) entries. Metrics without a year suffix
+    become a family of one. Returns [(family_base_name, [(year, metric), ...])]
+    preserving the order families first appear."""
     families = {}
     order = []
 
@@ -304,39 +303,9 @@ def group_into_families(metrics):
     return [(base, families[base]) for base in order]
 
 
-def is_cds_metric(metric):
-    return "cds" in clean_metric_name(metric).lower()
-
-
-def display_metric_name(metric):
-    """Chart/table title: cleaned name with '%' markers removed —
-    'Equity Price %(▲ 3 months)' → 'Equity Price (▲ 3 months)',
-    'Gross NPAs/... + OREO (%)' → 'Gross NPAs/... + OREO',
-    'YoY (▲%)' → 'YoY (▲)'."""
-    s = clean_metric_name(metric)
-    s = s.replace("(▲%)", "(▲)")
-    s = s.replace("%(", "(")
-    s = s.replace("(%)", "")
-    return " ".join(s.split())
-
-
-def display_labels(metrics):
-    """Cleaned metric names made unique again for pandas (Styler requires a
-    unique index). Duplicates get zero-width spaces appended, so 'YoY (▲%)'
-    can appear twice looking identical while remaining distinct labels."""
-    seen = {}
-    labels = []
-    for m in metrics:
-        name = display_metric_name(m)
-        seen[name] = seen.get(name, 0) + 1
-        labels.append(name + "\u200b" * (seen[name] - 1))
-    return labels
-
-
 def resolve_family_bank_order(entries, num_v, sort_mode):
     """Decide which banks appear on a family's chart, and in what order,
-    based on the most recent year's values (falling back to whichever year
-    has data). Honors the same three sort modes as single-metric charts."""
+    based on the most-recent year's values. Honors the three sort modes."""
 
     def usable_series(metric):
         s = num_v.loc[metric].dropna()
@@ -375,6 +344,35 @@ def resolve_family_bank_order(entries, num_v, sort_mode):
         )
 
     return all_banks
+
+
+def is_cds_metric(metric):
+    return "cds" in clean_metric_name(metric).lower()
+
+
+def display_metric_name(metric):
+    """Chart/table title: cleaned name with '%' markers removed —
+    'Equity Price %(▲ 3 months)' → 'Equity Price (▲ 3 months)',
+    'Gross NPAs/... + OREO (%)' → 'Gross NPAs/... + OREO',
+    'YoY (▲%)' → 'YoY (▲)'."""
+    s = clean_metric_name(metric)
+    s = s.replace("(▲%)", "(▲)")
+    s = s.replace("%(", "(")
+    s = s.replace("(%)", "")
+    return " ".join(s.split())
+
+
+def display_labels(metrics):
+    """Cleaned metric names made unique again for pandas (Styler requires a
+    unique index). Duplicates get zero-width spaces appended, so 'YoY (▲%)'
+    can appear twice looking identical while remaining distinct labels."""
+    seen = {}
+    labels = []
+    for m in metrics:
+        name = display_metric_name(m)
+        seen[name] = seen.get(name, 0) + 1
+        labels.append(name + "\u200b" * (seen[name] - 1))
+    return labels
 
 
 def parse_value(raw):
@@ -613,9 +611,8 @@ def build_numeric(raw):
 # PDF report (reportlab for layout, matplotlib for static charts)
 # --------------------------------------------------------------------------- #
 def _metric_png(metric, num_v, fmt, sort_mode, highlight, median_group):
-    """Render one (single-year) metric's bar chart to PNG bytes with
-    matplotlib (Agg), mirroring the on-screen chart: same colors, ordering,
-    and highlight."""
+    """Render one metric's bar chart to PNG bytes with matplotlib (Agg),
+    mirroring the on-screen chart: same colors, ordering, and highlight."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -733,7 +730,7 @@ def _family_png_multi(family_base, entries, num_v, fmt, sort_mode,
         series = num_v.loc[metric]
         values = [
             series[b] if (b in series.index and b not in excluded
-                         and pd.notna(series[b])) else float("nan")
+                          and pd.notna(series[b])) else float("nan")
             for b in banks
         ]
         offset = (i - (n_years - 1) / 2) * width
@@ -760,7 +757,7 @@ def _family_png_multi(family_base, entries, num_v, fmt, sort_mode,
     ax.spines[["top", "right"]].set_visible(False)
     ax.tick_params(axis="y", labelsize=7)
     ax.set_title(display_metric_name(family_base), fontsize=10,
-                fontweight="bold")
+                 fontweight="bold")
 
     if fmt == "currency":
         ax.set_ylabel("US$ MM", fontsize=7, color="#666666")
@@ -785,7 +782,6 @@ def _family_png_multi(family_base, entries, num_v, fmt, sort_mode,
                         bbox=dict(boxstyle="round,pad=0.2",
                                   fc="white", ec=clr, lw=0.6))
 
-    # Year legend, at the bottom of the chart.
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.32),
               ncol=n_years, fontsize=7, frameon=False)
 
@@ -810,8 +806,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
                      sort_mode, highlight, dates_items, median_group):
     """Assemble a landscape PDF: title + comparison table (with 'Region' and
     'As of' columns) on page 1, then charts grouped by topic -- each topic
-    starts on its own landscape page. Metrics that share a base name across
-    years (e.g. Revenue 2025/2024) are combined into a single grouped chart."""
+    starts on its own landscape page."""
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.lib import colors
@@ -911,8 +906,6 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
         "Industry medians: " + " &nbsp;·&nbsp; ".join(lines), subtitle))
 
     # --- Charts grouped by topic: each topic starts on its own page.
-    # Within a topic, metrics that share a base name across years are
-    # combined into one grouped chart (e.g. Revenue 2025 + 2024 together).
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
 
@@ -1279,8 +1272,6 @@ with tab_heat:
 
 
 def _metric_bar_fig(metric, fmt):
-    """Single-year metric chart (used for metrics with no year suffix, and
-    as a fallback if only one year of a family is currently selected)."""
     row_position = list(num_v.index).index(metric)
     series = num_v.iloc[row_position].dropna()
     series = series.drop(index=[b for b in chart_excluded_banks(metric)
@@ -1381,8 +1372,8 @@ def _metric_bar_fig(metric, fmt):
 
 
 def _family_bar_fig_multi(family_base, entries, fmt):
-    """Multi-year family chart: one bar cluster per bank, one color per
-    year, with a legend along the bottom identifying the years."""
+    """Multi-year family chart on screen: one bar cluster per bank, one
+    color per year, legend along the bottom identifying the years."""
     entries = sorted(entries, key=lambda e: (e[0] is None, -(e[0] or 0)))
     years = [y for y, _ in entries]
     banks = resolve_family_bank_order(entries, num_v, sort_mode)
@@ -1424,7 +1415,7 @@ def _family_bar_fig_multi(family_base, entries, fmt):
             textfont=dict(color=text_colors),
             customdata=[[b, bank_region(b)] for b in banks],
             hovertemplate=("<b>%{customdata[0]}</b> · %{customdata[1]}"
-                          "<br>%{y}<extra></extra>"),
+                           "<br>%{y}<extra></extra>"),
             cliponaxis=False,
         ))
 
@@ -1457,7 +1448,7 @@ def _family_bar_fig_multi(family_base, entries, fmt):
         barmode="group",
         showlegend=True,
         legend=dict(orientation="h", yanchor="top", y=-0.22,
-                   xanchor="center", x=0.5),
+                    xanchor="center", x=0.5),
     )
 
     if median_group:
@@ -1480,7 +1471,7 @@ def _family_bar_fig_multi(family_base, entries, fmt):
 
 
 def _render_family_fig(family_base, entries):
-    """Dispatch a family to the single-year or multi-year chart builder."""
+    """Dispatch a family to single-year or multi-year on-screen chart."""
     if len(entries) <= 1:
         metric = entries[0][1]
         return _metric_bar_fig(metric, formats[metric])
