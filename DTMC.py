@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -14,7 +15,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v21 — 2026-07-13"
+APP_VERSION = "v22 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -824,71 +825,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     subtitle = ParagraphStyle("sub", parent=styles["Normal"], fontSize=8,
                               textColor=colors.HexColor("#666666"))
 
-    story = [
-        Paragraph(REPORT_TITLE, styles["Title"]),
-        Paragraph(
-            f"Generated {datetime.now():%Y-%m-%d %H:%M} &nbsp;|&nbsp; "
-            f"{len(banks)} banks &nbsp;|&nbsp; {len(metrics)} metrics "
-            f"&nbsp;|&nbsp; source: {source_label} &nbsp;|&nbsp; {APP_VERSION}",
-            subtitle,
-        ),
-        Spacer(1, 10),
-    ]
-
-    # --- Comparison table (banks as rows so it grows down the page).
-    # Market indicators are charted on their own page but excluded here.
-    table_metrics = [
-        m for m in metrics
-        if not any(k in clean_metric_name(m).lower() for k in MARKET_KEYWORDS)
-    ]
-
-    header = [Paragraph("Bank", h_cell)]
-    header += [Paragraph(display_metric_name(m), h_cell)
-               for m in table_metrics]
-
-    table_data = [header]
-    red_cells = []  # (col, row) coords of negative values
-
-    for r, bank in enumerate(banks, start=1):
-        cells = [Paragraph(bank, row_lbl)]
-        for c, metric in enumerate(table_metrics, start=1):
-            val = num_v.loc[metric, bank]
-            cells.append(format_value(val, formats[metric], raw_v.loc[metric, bank]))
-            if pd.notna(val) and val < 0:
-                red_cells.append((c, r))
-        table_data.append(cells)
-
-    first_w = 1.0 * inch
-    other_w = (avail_w - first_w) / max(len(table_metrics), 1)
-    col_widths = [first_w] + [other_w] * len(table_metrics)
-    table = Table(table_data, colWidths=col_widths, repeatRows=1)
-    style = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(ACCENT)),
-        ("FONTSIZE", (0, 1), (-1, -1), 7),
-        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-         [colors.white, colors.HexColor("#f3f7f9")]),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]
-    for c, r in red_cells:
-        style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(NEG)))
-    table.setStyle(TableStyle(style))
-    story.append(table)
-
-    # Bank legend under the table.
-    legend = ";  ".join(f"<b>{b}</b> = {full_bank_name(b)}" for b in banks)
-    story += [
-        Spacer(1, 6),
-        Paragraph(legend, subtitle),
-        Spacer(1, 4),
-        Paragraph(SCALE_NOTE, subtitle),
-        Paragraph(CONSOLIDATED_NOTE, subtitle),
-    ]
-
-    # --- Charts grouped by topic: each topic starts on its own page.
+    story = []
 
     # Reusable Industry medians line (shown on the Financial Performance page).
     _median_lines = []
@@ -903,12 +840,16 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
 
-    for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
+    for topic_index, (topic, topic_metrics) in enumerate(
+            group_metrics_by_topic(metrics, formats)):
         if not topic_metrics:
             continue
 
-        story += [PageBreak(),
-                  Paragraph(topic, styles["Heading2"])]
+        # Every topic starts on a new page. The first one doesn't need a
+        # PageBreak because there's nothing before it.
+        if topic_index > 0:
+            story.append(PageBreak())
+        story.append(Paragraph(topic, styles["Heading2"]))
 
         if topic == TOPIC_MARKET:
             story.append(Paragraph(MARKET_NOTE, subtitle))
