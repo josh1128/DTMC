@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -15,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v22 — 2026-07-13"
+APP_VERSION = "v23 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -329,7 +328,9 @@ def resolve_family_bank_order(entries, num_v, sort_mode):
             if b not in all_banks:
                 all_banks.append(b)
 
-    if sort_mode == "By value":
+    if sort_mode == "Alphabetical":
+        all_banks.sort(key=lambda b: str(b).lower())
+    elif sort_mode == "By value":
         all_banks.sort(
             key=lambda b: -(baseline_series[b] if b in baseline_series.index
                             else float("-inf"))
@@ -628,7 +629,10 @@ def _metric_png(metric, num_v, fmt, sort_mode, highlight, median_group):
     if series.empty:
         return None
 
-    if sort_mode == "By value":
+    if sort_mode == "Alphabetical":
+        order = sorted(series.index, key=lambda b: str(b).lower())
+        series = series.loc[order]
+    elif sort_mode == "By value":
         series = series.sort_values(ascending=False)
     elif sort_mode == "By region, then value":
         order = sorted(series.index,
@@ -798,7 +802,8 @@ def _family_png(family_base, entries, num_v, formats, sort_mode, highlight,
 
 
 def build_pdf_report(raw_v, num_v, formats, source_label,
-                     sort_mode, highlight, dates_items, median_group):
+                     sort_mode, highlight, dates_items, median_group,
+                     use_option_1):
     """Assemble a landscape PDF: title + comparison table (with 'Region' and
     'As of' columns) on page 1, then charts grouped by topic -- each topic
     starts on its own landscape page."""
@@ -827,6 +832,58 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 
     story = []
 
+    # --- Comparison table (alphabetical, no market indicators). --------------
+    alpha_banks = sorted(banks, key=lambda b: str(b).lower())
+    table_metrics = [
+        m for m in metrics
+        if not any(k in clean_metric_name(m).lower() for k in MARKET_KEYWORDS)
+    ]
+
+    header = [Paragraph("Bank", h_cell)]
+    header += [Paragraph(display_metric_name(m), h_cell) for m in table_metrics]
+    table_data = [header]
+    red_cells = []
+    for r, bank in enumerate(alpha_banks, start=1):
+        cells = [Paragraph(bank, row_lbl)]
+        for c, metric in enumerate(table_metrics, start=1):
+            val = num_v.loc[metric, bank]
+            cells.append(format_value(val, formats[metric],
+                                      raw_v.loc[metric, bank]))
+            if pd.notna(val) and val < 0:
+                red_cells.append((c, r))
+        table_data.append(cells)
+
+    first_w = 1.0 * inch
+    other_w = (avail_w - first_w) / max(len(table_metrics), 1)
+    tbl = Table(table_data,
+                colWidths=[first_w] + [other_w] * len(table_metrics),
+                repeatRows=1)
+    tbl_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(ACCENT)),
+        ("FONTSIZE", (0, 1), (-1, -1), 7),
+        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+         [colors.white, colors.HexColor("#f3f7f9")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for c, r in red_cells:
+        tbl_style.append(("TEXTCOLOR", (c, r), (c, r), colors.HexColor(NEG)))
+    tbl.setStyle(TableStyle(tbl_style))
+    story.append(tbl)
+
+    # Bank legend + notes directly below the table.
+    legend = ";  ".join(f"<b>{b}</b> = {full_bank_name(b)}" for b in alpha_banks)
+    story += [
+        Spacer(1, 6),
+        Paragraph(legend, subtitle),
+        Spacer(1, 4),
+        Paragraph(SCALE_NOTE, subtitle),
+        Paragraph(CONSOLIDATED_NOTE, subtitle),
+    ]
+
     # Reusable Industry medians line (shown on the Financial Performance page).
     _median_lines = []
     for _group_name, _group_data in INDUSTRY_MEDIAN_GROUPS.items():
@@ -840,15 +897,12 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
     img_w = (avail_w - 0.2 * inch) / 2
     img_h = img_w * 0.54  # keeps 2 chart rows + notes on one landscape page
 
-    for topic_index, (topic, topic_metrics) in enumerate(
-            group_metrics_by_topic(metrics, formats)):
+    for topic, topic_metrics in group_metrics_by_topic(metrics, formats):
         if not topic_metrics:
             continue
 
-        # Every topic starts on a new page. The first one doesn't need a
-        # PageBreak because there's nothing before it.
-        if topic_index > 0:
-            story.append(PageBreak())
+        # Every topic starts on a new page (the table sits on page 1).
+        story.append(PageBreak())
         story.append(Paragraph(topic, styles["Heading2"]))
 
         if topic == TOPIC_MARKET:
@@ -861,20 +915,42 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
                 story.append(Paragraph(_industry_medians_note, subtitle))
         story.append(Spacer(1, 4))
 
-        pair = []
         chart_rows = []
-        for family_base, entries in group_into_families(topic_metrics):
-            png = _family_png(family_base, entries, num_v, formats,
-                              sort_mode, highlight, median_group)
-            if png is None:
-                continue
-            pair.append(Image(io.BytesIO(png), width=img_w, height=img_h))
-            if len(pair) == 2:
+        if use_option_1 and topic == TOPIC_PERFORMANCE:
+            # Pair each currency family with the next YoY family: currency
+            # LEFT, YoY RIGHT, one row each.
+            left_png = None
+            for family_base, entries in group_into_families(topic_metrics):
+                png = _family_png(family_base, entries, num_v, formats,
+                                  sort_mode, highlight, median_group)
+                if png is None:
+                    continue
+                is_yoy = "yoy" in family_base.lower()
+                img = Image(io.BytesIO(png), width=img_w, height=img_h)
+                if is_yoy:
+                    chart_rows.append([left_png or "", img])
+                    left_png = None
+                else:
+                    if left_png is not None:
+                        chart_rows.append([left_png, ""])
+                    left_png = img
+            if left_png is not None:
+                chart_rows.append([left_png, ""])
+        else:
+            pair = []
+            for family_base, entries in group_into_families(topic_metrics):
+                png = _family_png(family_base, entries, num_v, formats,
+                                  sort_mode, highlight, median_group)
+                if png is None:
+                    continue
+                pair.append(Image(io.BytesIO(png),
+                                  width=img_w, height=img_h))
+                if len(pair) == 2:
+                    chart_rows.append(pair)
+                    pair = []
+            if pair:
+                pair.append("")
                 chart_rows.append(pair)
-                pair = []
-        if pair:
-            pair.append("")
-            chart_rows.append(pair)
         if chart_rows:
             grid = Table(chart_rows, colWidths=[img_w + 0.1 * inch] * 2)
             grid.setStyle(TableStyle([
@@ -907,7 +983,7 @@ def build_pdf_report(raw_v, num_v, formats, source_label,
 @st.cache_data(show_spinner="Building PDF report…")
 def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
                      sort_mode, highlight, dates_items, median_group,
-                     app_version=APP_VERSION):
+                     use_option_1, app_version=APP_VERSION):
     """Cached wrapper so the PDF only rebuilds when the data, selection,
     sort order, or highlight changes."""
     raw_v = pd.read_csv(io.StringIO(raw_csv), dtype=str,
@@ -922,7 +998,8 @@ def get_report_bytes(raw_csv, formats_items, metrics, banks, source_label,
                          columns=raw_v.columns).astype("float64")
 
     return build_pdf_report(raw_v, num_v, formats, source_label,
-                            sort_mode, highlight, dates_items, median_group)
+                            sort_mode, highlight, dates_items, median_group,
+                            use_option_1)
 
 
 st.set_page_config(
@@ -1023,11 +1100,27 @@ with st.sidebar:
 
     st.divider()
 
-    sort_mode = st.radio(
-        "Bank order in charts",
-        ["By value", "By region, then value", "File order"],
+    layout_option = st.radio(
+        "Chart layout",
+        ["Option 1 — Revenue & NI on left, YoY on right (alphabetical)",
+         "Option 2 — Original (choose sort order below)"],
         index=0,
+        help="Option 1 pairs each currency chart with its YoY chart in the "
+             "same row and forces a shared alphabetical bank order, so bars "
+             "line up across charts. Option 2 keeps the original layout "
+             "with per-chart sorting.",
     )
+    use_option_1 = layout_option.startswith("Option 1")
+
+    if use_option_1:
+        sort_mode = "Alphabetical"
+        st.caption("Sort order: **Alphabetical** (locked in Option 1).")
+    else:
+        sort_mode = st.radio(
+            "Bank order in charts",
+            ["By value", "By region, then value", "Alphabetical", "File order"],
+            index=0,
+        )
 
     highlight = st.selectbox(
         "Highlight a bank",
@@ -1094,6 +1187,7 @@ with st.sidebar:
             tuple((b, str(report_dates[b])) for b in sel_banks)
             if report_dates is not None else (),
             median_group,
+            use_option_1,
             APP_VERSION,
         )
 
@@ -1228,7 +1322,10 @@ def _metric_bar_fig(metric, fmt):
     frame.columns = ["Bank", "Value"]
     frame["Region"] = [bank_region(b) for b in frame["Bank"]]
 
-    if sort_mode == "By value":
+    if sort_mode == "Alphabetical":
+        frame = frame.sort_values("Bank",
+                                  key=lambda s: s.str.lower())
+    elif sort_mode == "By value":
         frame = frame.sort_values("Value", ascending=False)
     elif sort_mode == "By region, then value":
         frame = frame.sort_values(["Region", "Value"],
@@ -1436,16 +1533,28 @@ with tab_charts:
                     show_reporting_dates()
 
                 cols = st.columns(2)
-                shown = 0
+                families = list(group_into_families(page_metrics))
 
-                for family_base, entries in group_into_families(page_metrics):
-                    fig = _render_family_fig(family_base, entries)
-
-                    if fig is None:
-                        continue
-
-                    cols[shown % 2].plotly_chart(fig, use_container_width=True)
-                    shown += 1
+                if use_option_1 and topic == TOPIC_PERFORMANCE:
+                    # Pair each currency family with the next YoY family in
+                    # the SAME row: currency goes left, YoY goes right.
+                    left_col_used = False
+                    for family_base, entries in families:
+                        fig = _render_family_fig(family_base, entries)
+                        if fig is None:
+                            continue
+                        is_yoy = "yoy" in family_base.lower()
+                        target = cols[1 if is_yoy else 0]
+                        target.plotly_chart(fig, use_container_width=True)
+                else:
+                    shown = 0
+                    for family_base, entries in families:
+                        fig = _render_family_fig(family_base, entries)
+                        if fig is None:
+                            continue
+                        cols[shown % 2].plotly_chart(
+                            fig, use_container_width=True)
+                        shown += 1
 
                 if shown == 0:
                     st.info("No numeric values to chart for this topic.")
