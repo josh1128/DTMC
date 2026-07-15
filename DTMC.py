@@ -14,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v24 — 2026-07-13"
+APP_VERSION = "v25 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -715,7 +715,7 @@ def _family_png_multi(family_base, entries, num_v, fmt, sort_mode,
     import numpy as np
     from matplotlib.ticker import FuncFormatter
 
-    entries = sorted(entries, key=lambda e: (e[0] is None, -(e[0] or 0)))
+    entries = sorted(entries, key=lambda e: (e[0] is None, e[0] or 0))
     years = [y for y, _ in entries]
     banks = resolve_family_bank_order(entries, num_v, sort_mode)
 
@@ -1102,8 +1102,8 @@ with st.sidebar:
 
     layout_option = st.radio(
         "Chart layout",
-        ["Option 1 — Alphabetical",
-         "Option 2 — Ranking"],
+        ["Option 1 — Revenue & NI on left, YoY on right (alphabetical)",
+         "Option 2 — Original (choose sort order below)"],
         index=0,
         help="Option 1 pairs each currency chart with its YoY chart in the "
              "same row and forces a shared alphabetical bank order, so bars "
@@ -1413,7 +1413,7 @@ def _metric_bar_fig(metric, fmt):
 def _family_bar_fig_multi(family_base, entries, fmt):
     """Multi-year family chart on screen: one bar cluster per bank, one
     color per year, legend along the bottom identifying the years."""
-    entries = sorted(entries, key=lambda e: (e[0] is None, -(e[0] or 0)))
+    entries = sorted(entries, key=lambda e: (e[0] is None, e[0] or 0))
     years = [y for y, _ in entries]
     banks = resolve_family_bank_order(entries, num_v, sort_mode)
 
@@ -1570,3 +1570,4 @@ legend_cols = st.columns(3)
 
 for i, b in enumerate(sel_banks):
     legend_cols[i % 3].markdown(f"**{b}** — {full_bank_name(b)}")
+
