@@ -14,7 +14,7 @@ EXCEL_PATH = os.path.join(
     "DTMC stats.xlsx"
 )
 
-APP_VERSION = "v23 — 2026-07-13"
+APP_VERSION = "v24 — 2026-07-13"
 
 REPORT_TITLE = "Financial Performance of RG Participants - FY 2025"
 
@@ -1102,8 +1102,8 @@ with st.sidebar:
 
     layout_option = st.radio(
         "Chart layout",
-        ["Option 1 — Revenue & NI on left, YoY on right (alphabetical)",
-         "Option 2 — Original (choose sort order below)"],
+        ["Option 1 — Alphabetical",
+         "Option 2 — Ranking"],
         index=0,
         help="Option 1 pairs each currency chart with its YoY chart in the "
              "same row and forces a shared alphabetical bank order, so bars "
@@ -1534,11 +1534,11 @@ with tab_charts:
 
                 cols = st.columns(2)
                 families = list(group_into_families(page_metrics))
+                shown = 0
 
                 if use_option_1 and topic == TOPIC_PERFORMANCE:
                     # Pair each currency family with the next YoY family in
                     # the SAME row: currency goes left, YoY goes right.
-                    left_col_used = False
                     for family_base, entries in families:
                         fig = _render_family_fig(family_base, entries)
                         if fig is None:
@@ -1546,8 +1546,8 @@ with tab_charts:
                         is_yoy = "yoy" in family_base.lower()
                         target = cols[1 if is_yoy else 0]
                         target.plotly_chart(fig, use_container_width=True)
+                        shown += 1
                 else:
-                    shown = 0
                     for family_base, entries in families:
                         fig = _render_family_fig(family_base, entries)
                         if fig is None:
